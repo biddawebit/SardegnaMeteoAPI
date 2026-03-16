@@ -34,7 +34,8 @@ app.post('/extract', async (req, res) => {
             return res.status(400).json({ error: "Campo 'pdfUrl' mancante nel JSON della richiesta." });
         }
 
-        console.log("Scaricando PDF:", pdfUrl);
+        console.log("-----------------------------------------");
+        console.log("START API - Scaricando PDF:", pdfUrl);
         
         // 1. Download PDF to Uint8Array safely server-side
         const response = await fetch(pdfUrl, {
@@ -48,7 +49,7 @@ app.post('/extract', async (req, res) => {
         const arrayBuffer = await response.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
 
-        console.log("PDF scaricato, inizio elaborazione...");
+        console.log("PDF scaricato in memoria, avvio PDF.js...");
 
         // 2. Init PDF.js parsing
         const loadingTask = getDocument({
@@ -91,6 +92,7 @@ app.post('/extract', async (req, res) => {
             let mTitleAlt = normalizedText.match(/(AVVISO DI CRITICIT[AÀaà]['’]?.{0,100}?)/i);
             if (mTitleAlt) title = mTitleAlt[1].trim() + " (Titolo parziale)";
         }
+        console.log("TITOLO ESTRATTO:", title);
 
         let mInizio = normalizedText.match(patternInizio);
         if (mInizio) inizio = mInizio[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
@@ -107,6 +109,7 @@ app.post('/extract', async (req, res) => {
         // -------------------------------------------------------------
         // Server-Side Canvas Render
         // -------------------------------------------------------------
+        console.log("Avvio render grafico su virtual Canvas...");
         const page1 = await pdf.getPage(1);
         const viewport = page1.getViewport({ scale: 1.5 }); 
         
@@ -119,6 +122,7 @@ app.post('/extract', async (req, res) => {
             viewport: viewport,
             canvasFactory: canvasFactory 
         }).promise;
+        console.log("Render completato: Size", viewport.width, "x", viewport.height);
         
         const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height).data;
 
@@ -144,6 +148,7 @@ app.post('/extract', async (req, res) => {
         });
         let bestYStr = Object.keys(yGroups).sort((a,b) => yGroups[b].length - yGroups[a].length)[0];
         let headerRow = bestYStr ? yGroups[bestYStr].sort((a,b) => a.x - b.x) : [];
+        console.log("Header time columns found:", headerRow.length);
 
         let dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
         dateHeadersRaw.sort((a,b) => a.x - b.x);
@@ -166,6 +171,7 @@ app.post('/extract', async (req, res) => {
                 cleanRisks.push(r);
             }
         });
+        console.log("Risks labels found:", cleanRisks.length);
 
         let zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
         let zonesRows = [];
@@ -183,6 +189,7 @@ app.post('/extract', async (req, res) => {
             if(last && (z.y - last.y) < 30) return; 
             if(cleanZones.length < 7) cleanZones.push(z);
         });
+        console.log("Zones found:", cleanZones.length);
 
         const levelsMap = {
             'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
@@ -215,22 +222,31 @@ app.post('/extract', async (req, res) => {
                     
                     let sampleX = th.x + 10; 
                     let sampleY = risk.y - 8; 
+                    
+                    // DEBUG: DUMP THE MIDDLE OF THE FIRST RISK OF FIRST ZONE
+                    if (zIdx === 0 && risk === uniqueRisks[0] && hIdx === 4) {
+                        console.log(`\n\n[DEBUG PIXEL] Testing ${zone.name} -> ${risk.str} at ${th.str}:00`);
+                        console.log(`[DEBUG PIXEL] Exact coordinate sampled: X:${sampleX}, Y:${sampleY}`);
+                        let centerPx = getPixel(sampleX, sampleY);
+                        console.log(`[DEBUG PIXEL] Center RGB: (${centerPx.r}, ${centerPx.g}, ${centerPx.b})`);
+                    }
 
                     let foundLevel = null;
-                        for(let dx = -2; dx <= 2; dx++) {
-                            for(let dy = -2; dy <= 2; dy++) {
+                        for(let dx = -4; dx <= 4; dx += 2) {
+                            for(let dy = -4; dy <= 4; dy += 2) {
                                 let px = getPixel(sampleX + dx, sampleY + dy);
                                 
-                                // Giallo: Alto rosso, alto verde, basso blu
-                                if(px.r > 150 && px.g > 150 && px.b < 150) { 
+                                // TOLLERANZA ESTREMA PER SERVER LINUX (Vercel/Render)
+                                // Giallo
+                                if(px.r > 130 && px.g > 130 && px.b < 180 && px.r > px.b + 50) { 
                                     foundLevel = levelsMap['giallo']; 
                                 }
-                                // Arancione (e rosso mescolato): Alto rosso, medio verde, basso blu
-                                else if(px.r > 150 && px.g > 80 && px.g < 200 && px.b < 150) { 
+                                // Arancione
+                                else if(px.r > 130 && px.g > 60 && px.g < 200 && px.b < 150 && px.r > px.g + 30) { 
                                     foundLevel = levelsMap['arancione']; 
                                 }
-                                // Rosso intenso: Alto rosso, bassissimo verde, bassissimo blu
-                                else if(px.r > 150 && px.g < 80 && px.b < 80) { 
+                                // Rosso intenso
+                                else if(px.r > 130 && px.g < 100 && px.b < 100) { 
                                     foundLevel = levelsMap['rosso']; 
                                 }
                                 
@@ -329,6 +345,7 @@ app.post('/extract', async (req, res) => {
         xmlStr += `    <description><![CDATA[${title}]]></description>\n`;
         
         if (alertZonesFound.length > 0) {
+            console.log("ALERT TROVATI. Generazione XML con zone: ", alertZonesFound.length);
             alertZonesFound.forEach(az => {
                 xmlStr += `    <item>\n`;
                 xmlStr += `      <title><![CDATA[Allerta Zona: ${az.zone}]]></title>\n`;
@@ -357,6 +374,7 @@ app.post('/extract', async (req, res) => {
                 xmlStr += `    </item>\n`;
             });
         } else {
+            console.log("NESSUN ALLARME RILEVATO: Restituzione XML vuoto");
             xmlStr += `    <item>\n`;
             xmlStr += `      <title><![CDATA[Nessuna Allerta]]></title>\n`;
             xmlStr += `      <description><![CDATA[Nessuna criticità identificata in nessuna zona.]]></description>\n`;
