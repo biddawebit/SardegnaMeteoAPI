@@ -402,6 +402,46 @@ app.post('/extract', async (req, res) => {
     }
 });
 
+app.post('/debug-image', async (req, res) => {
+    try {
+        const pdfUrl = req.body.pdfUrl;
+        if (!pdfUrl) return res.status(400).send("No pdfUrl");
+
+        const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const arrayBuffer = await response.arrayBuffer();
+        
+        const loadingTask = getDocument({
+            data: new Uint8Array(arrayBuffer),
+            disableFontFace: true,
+            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
+        });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.5 });
+        
+        const canvasFactory = new NodeCanvasFactory();
+        const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
+        const ctx = canvasAndContext.context;
+        
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, viewport.width, viewport.height);
+
+        await page.render({ 
+            canvasContext: ctx, 
+            viewport: viewport,
+            canvasFactory: canvasFactory,
+            background: 'rgba(255,255,255,1)' 
+        }).promise;
+        
+        const buffer = canvasAndContext.canvas.toBuffer('image/png');
+        res.type('image/png');
+        res.send(buffer);
+        
+    } catch (err) {
+        res.status(500).send("Error: " + err.message);
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`📡 API Estrazione Colori PDF in ascolto sulla porta ${PORT}`);
