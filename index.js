@@ -217,16 +217,27 @@ app.post('/extract', async (req, res) => {
                     let sampleY = risk.y - 8; 
 
                     let foundLevel = null;
-                    for(let dx = -2; dx <= 2; dx++) {
-                        for(let dy = -2; dy <= 2; dy++) {
-                            let px = getPixel(sampleX + dx, sampleY + dy);
-                            if(px.r > 200 && px.g > 200 && px.b < 100) foundLevel = levelsMap['giallo'];
-                            else if(px.r > 200 && px.g > 100 && px.g < 180 && px.b < 100) foundLevel = levelsMap['arancione'];
-                            else if(px.r > 200 && px.g < 100 && px.b < 100) foundLevel = levelsMap['rosso'];
+                        for(let dx = -2; dx <= 2; dx++) {
+                            for(let dy = -2; dy <= 2; dy++) {
+                                let px = getPixel(sampleX + dx, sampleY + dy);
+                                
+                                // Giallo: Alto rosso, alto verde, basso blu
+                                if(px.r > 150 && px.g > 150 && px.b < 150) { 
+                                    foundLevel = levelsMap['giallo']; 
+                                }
+                                // Arancione (e rosso mescolato): Alto rosso, medio verde, basso blu
+                                else if(px.r > 150 && px.g > 80 && px.g < 200 && px.b < 150) { 
+                                    foundLevel = levelsMap['arancione']; 
+                                }
+                                // Rosso intenso: Alto rosso, bassissimo verde, bassissimo blu
+                                else if(px.r > 150 && px.g < 80 && px.b < 80) { 
+                                    foundLevel = levelsMap['rosso']; 
+                                }
+                                
+                                if(foundLevel) break;
+                            }
                             if(foundLevel) break;
                         }
-                        if(foundLevel) break;
-                    }
 
                     if(foundLevel) {
                         let dIdx = Math.min(currentDateIdx, Math.max(0, dateHeaders.length - 1));
