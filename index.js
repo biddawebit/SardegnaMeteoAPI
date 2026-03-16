@@ -117,11 +117,17 @@ app.post('/extract', async (req, res) => {
         const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
         const ctx = canvasAndContext.context;
         
+        // IMPORTANT: Force white background so transparent PDFs don't become black
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, viewport.width, viewport.height);
+
         await page1.render({ 
             canvasContext: ctx, 
             viewport: viewport,
-            canvasFactory: canvasFactory 
+            canvasFactory: canvasFactory,
+            background: 'rgba(255,255,255,1)' 
         }).promise;
+        
         console.log("Render completato: Size", viewport.width, "x", viewport.height);
         
         const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height).data;
@@ -236,7 +242,7 @@ app.post('/extract', async (req, res) => {
                             for(let dy = -4; dy <= 4; dy += 2) {
                                 let px = getPixel(sampleX + dx, sampleY + dy);
                                 
-                                // TOLLERANZA ESTREMA PER SERVER LINUX (Vercel/Render)
+                                // TOLLERANZA ESTREMA PER SERVER LINUX E SFONDO (Vercel/Render)
                                 // Giallo
                                 if(px.r > 130 && px.g > 130 && px.b < 180 && px.r > px.b + 50) { 
                                     foundLevel = levelsMap['giallo']; 
