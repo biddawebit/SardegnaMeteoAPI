@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDocument } = require('pdfjs-dist/legacy/build/pdf.js');
+const { getDocument, OPS } = require('pdfjs-dist/legacy/build/pdf.js');
 const { createCanvas } = require('canvas');
 
 const app = express();
@@ -10,7 +10,6 @@ class NodeCanvasFactory {
     create(width, height) {
         const canvas = createCanvas(width, height);
         const context = canvas.getContext('2d');
-        // VERNICE BIANCA OPACA ISTANTANEA ALLA CREAZIONE DEL FOGLIO!
         context.fillStyle = 'white';
         context.fillRect(0, 0, width, height);
         return { canvas, context };
@@ -18,7 +17,6 @@ class NodeCanvasFactory {
     reset(canvasAndContext, width, height) {
         canvasAndContext.canvas.width = width;
         canvasAndContext.canvas.height = height;
-        // VERNICE BIANCA OPACA ISTANTANEA AL RESET IMPOSTO DA PDF.JS!
         canvasAndContext.context.fillStyle = 'white';
         canvasAndContext.context.fillRect(0, 0, width, height);
     }
@@ -433,6 +431,64 @@ app.get('/debug-image', async (req, res) => {
         
     } catch (err) {
         res.status(500).send("Error: " + err.message);
+    }
+});
+
+app.get('/debug-ops', async (req, res) => {
+    try {
+        const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
+        
+        const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const arrayBuffer = await response.arrayBuffer();
+        
+        const loadingTask = getDocument({
+            data: new Uint8Array(arrayBuffer),
+            disableFontFace: true,
+            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
+        });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        
+        const ops = await page.getOperatorList();
+        
+        let coloredRects = [];
+        let curColor = null;
+        
+        for (let i = 0; i < ops.fnArray.length; i++) {
+            const fn = ops.fnArray[i];
+            const args = ops.argsArray[i];
+            
+            // setFillRGBColor
+            if (fn === OPS.setFillRGBColor) {
+                curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
+            }
+            
+            // rectangle
+            if (fn === OPS.rectangle) {
+                if (curColor && (curColor.r > 150 || curColor.g > 100)) { // Capture potential warning colors
+                    coloredRects.push({
+                        color: curColor,
+                        x: args[0],
+                        y: args[1], // Note: PDF coordinates are usually from bottom-left
+                        w: args[2],
+                        h: args[3]
+                    });
+                }
+            }
+        }
+        
+        // Also get some text coordinates for reference
+        const textContentPage = await page.getTextContent();
+        const texts = textContentPage.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] })).filter(t => t.str.trim().length > 0);
+        
+        res.json({
+            foundRectangles: coloredRects.length,
+            rectangles: coloredRects,
+            sampleTexts: texts.slice(0, 50)
+        });
+        
+    } catch (err) {
+        res.status(500).json({ error: err.message, stack: err.stack });
     }
 });
 
