@@ -9,14 +9,18 @@ app.use(express.json());
 class NodeCanvasFactory {
     create(width, height) {
         const canvas = createCanvas(width, height);
-        return {
-            canvas,
-            context: canvas.getContext('2d'),
-        };
+        const context = canvas.getContext('2d');
+        // VERNICE BIANCA OPACA ISTANTANEA ALLA CREAZIONE DEL FOGLIO!
+        context.fillStyle = 'white';
+        context.fillRect(0, 0, width, height);
+        return { canvas, context };
     }
     reset(canvasAndContext, width, height) {
         canvasAndContext.canvas.width = width;
         canvasAndContext.canvas.height = height;
+        // VERNICE BIANCA OPACA ISTANTANEA AL RESET IMPOSTO DA PDF.JS!
+        canvasAndContext.context.fillStyle = 'white';
+        canvasAndContext.context.fillRect(0, 0, width, height);
     }
     destroy(canvasAndContext) {
         canvasAndContext.canvas.width = 0;
@@ -123,17 +127,9 @@ app.post('/extract', async (req, res) => {
             canvasFactory: canvasFactory
         }).promise;
         
-        // 100% BULLETPROOF WHITE BACKGROUND
-        // Create a brand new, clean canvas to avoid any PDF.js clipping paths
-        const finalCanvas = createCanvas(viewport.width, viewport.height);
-        const finalCtx = finalCanvas.getContext('2d');
-        finalCtx.fillStyle = 'white';
-        finalCtx.fillRect(0, 0, viewport.width, viewport.height);
-        finalCtx.drawImage(canvasAndContext.canvas, 0, 0);
-        
         console.log("Render completato: Size", viewport.width, "x", viewport.height);
         
-        const imgData = finalCtx.getImageData(0, 0, viewport.width, viewport.height).data;
+        const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height).data;
 
         function getPixel(x, y) {
             const i = (Math.floor(y) * Math.floor(viewport.width) + Math.floor(x)) * 4;
@@ -431,14 +427,7 @@ app.get('/debug-image', async (req, res) => {
             canvasFactory: canvasFactory
         }).promise;
 
-        // 100% BULLETPROOF WHITE BACKGROUND
-        const finalCanvas = createCanvas(viewport.width, viewport.height);
-        const finalCtx = finalCanvas.getContext('2d');
-        finalCtx.fillStyle = 'white';
-        finalCtx.fillRect(0, 0, viewport.width, viewport.height);
-        finalCtx.drawImage(canvasAndContext.canvas, 0, 0);
-        
-        const buffer = finalCanvas.toBuffer('image/png');
+        const buffer = canvasAndContext.canvas.toBuffer('image/png');
         res.type('image/png');
         res.send(buffer);
         
