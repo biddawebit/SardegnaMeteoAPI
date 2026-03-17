@@ -118,9 +118,9 @@ app.all('/extract', async (req, res) => {
         if (mFineAvviso) fineAvviso = mFineAvviso[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
 
         // -------------------------------------------------------------
-        // Estrazione Vettoriale Pura (Zero Bug Grafici Linux)
+        // Estrazione Vettoriale Avanzata (Mappatura Robusta)
         // -------------------------------------------------------------
-        console.log("Avvio scansione vettoriale PDF bypassando la grafica...");
+        console.log("Avvio scansione vettoriale PDF avanzata...");
         const page1 = await pdf.getPage(1);
         const viewport = page1.getViewport({ scale: 1.5 }); 
         
@@ -128,7 +128,7 @@ app.all('/extract', async (req, res) => {
         let opNames = {};
         for (let k in OPS) { opNames[OPS[k]] = k; }
         
-        let coloredRects = [];
+        let coloredShapes = [];
         let curColor = null;
         let curPath = [];
         
@@ -152,6 +152,13 @@ app.all('/extract', async (req, res) => {
                 x * m[1] + y * m[3] + m[5]
             ];
         }
+        
+        function cmykToRgb(c, m, y, k) {
+            const r = 255 * (1 - c) * (1 - k);
+            const g = 255 * (1 - m) * (1 - k);
+            const b = 255 * (1 - y) * (1 - k);
+            return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
+        }
 
         const levelsMap = {
             'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
@@ -164,21 +171,15 @@ app.all('/extract', async (req, res) => {
             const args = ops.argsArray[i];
             const opName = opNames[fn];
             
-            if (opName === 'save') {
-                ctmStack.push([...ctm]);
-            }
-            if (opName === 'restore') {
-                ctm = ctmStack.pop();
-            }
-            if (opName === 'transform') {
-                ctm = transformMatrix(ctm, args);
-            }
+            if (opName === 'save') ctmStack.push([...ctm]);
+            if (opName === 'restore') ctm = ctmStack.pop();
+            if (opName === 'transform') ctm = transformMatrix(ctm, args);
             
             if (opName === 'setFillRGBColor' || opName === 'setStrokeRGBColor') {
                 curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
             }
             if (opName === 'setFillCMYKColor') {
-                curColor = { cmyk: args }; 
+                curColor = cmykToRgb(args[0], args[1], args[2], args[3]);
             }
             
             if (opName === 'constructPath') {
@@ -189,18 +190,15 @@ app.all('/extract', async (req, res) => {
                     if (op === 19) { // RECT opcode
                         curPath.push({ 
                             type: 'rect', 
-                            x: pathArgs[argIdx], 
-                            y: pathArgs[argIdx+1], 
-                            w: pathArgs[argIdx+2], 
-                            h: pathArgs[argIdx+3],
+                            x: pathArgs[argIdx], y: pathArgs[argIdx+1], 
+                            w: pathArgs[argIdx+2], h: pathArgs[argIdx+3],
                             ctm: [...ctm]
                         });
                         argIdx += 4;
                     } else if (op === 0 || op === 1) { // moveTo, lineTo
+                        curPath.push({ type: 'point', x: pathArgs[argIdx], y: pathArgs[argIdx+1], ctm: [...ctm] });
                         argIdx += 2;
-                    } else if (op === 2 || op === 3) { // curveTo, curveTo2
-                        argIdx += 6;
-                    }
+                    } else if (op === 2 || op === 3) { argIdx += 6; }
                 }
             }
             if (opName === 'rectangle') {
@@ -216,31 +214,29 @@ app.all('/extract', async (req, res) => {
                     
                     if (foundLevel) {
                         for (let p of curPath) {
+                            let xs = [], ys = [];
                             if (p.type === 'rect') {
-                                // Apply the CTM from the exact moment the rectangle was inserted!
-                                let pt1 = transformPoint(p.ctm, p.x, p.y);
-                                let pt2 = transformPoint(p.ctm, p.x + p.w, p.y);
-                                let pt3 = transformPoint(p.ctm, p.x, p.y + p.h);
-                                let pt4 = transformPoint(p.ctm, p.x + p.w, p.y + p.h);
-                                
-                                let vp1 = viewport.convertToViewportPoint(pt1[0], pt1[1]);
-                                let vp2 = viewport.convertToViewportPoint(pt2[0], pt2[1]);
-                                let vp3 = viewport.convertToViewportPoint(pt3[0], pt3[1]);
-                                let vp4 = viewport.convertToViewportPoint(pt4[0], pt4[1]);
-                                
-                                let xs = [vp1[0], vp2[0], vp3[0], vp4[0]];
-                                let ys = [vp1[1], vp2[1], vp3[1], vp4[1]];
-                                
-                                let minX = Math.min(...xs);
-                                let maxX = Math.max(...xs);
-                                let minY = Math.min(...ys);
-                                let maxY = Math.max(...ys);
-                                
-                                coloredRects.push({
+                                let pts = [
+                                    transformPoint(p.ctm, p.x, p.y),
+                                    transformPoint(p.ctm, p.x + p.w, p.y),
+                                    transformPoint(p.ctm, p.x, p.y + p.h),
+                                    transformPoint(p.ctm, p.x + p.w, p.y + p.h)
+                                ];
+                                pts.forEach(pt => {
+                                    let vp = viewport.convertToViewportPoint(pt[0], pt[1]);
+                                    xs.push(vp[0]); ys.push(vp[1]);
+                                });
+                            } else if (p.type === 'point') {
+                                let pt = transformPoint(p.ctm, p.x, p.y);
+                                let vp = viewport.convertToViewportPoint(pt[0], pt[1]);
+                                xs.push(vp[0]); ys.push(vp[1]);
+                            }
+                            
+                            if (xs.length > 0) {
+                                coloredShapes.push({
                                     level: foundLevel,
-                                    centerX: (minX + maxX) / 2,
-                                    centerY: (minY + maxY) / 2,
-                                    minX, maxX, minY, maxY
+                                    minX: Math.min(...xs), maxX: Math.max(...xs),
+                                    minY: Math.min(...ys), maxY: Math.max(...ys)
                                 });
                             }
                         }
@@ -248,12 +244,10 @@ app.all('/extract', async (req, res) => {
                 }
                 curPath = [];
             }
-            if (opName === 'endPath') {
-                curPath = [];
-            }
+            if (opName === 'endPath') curPath = [];
         }
         
-        console.log(`Trovati ${coloredRects.length} rettangoli di allerta puri nel codice del PDF.`);
+        console.log(`Trovati ${coloredShapes.length} elementi di allerta nel documento.`);
 
         const textContentPage = await page1.getTextContent();
         const items = textContentPage.items.map(it => {
@@ -272,62 +266,42 @@ app.all('/extract', async (req, res) => {
         });
         let bestYStr = Object.keys(yGroups).sort((a,b) => yGroups[b].length - yGroups[a].length)[0];
         let headerRow = bestYStr ? yGroups[bestYStr].sort((a,b) => a.x - b.x) : [];
-        console.log("Header time columns found:", headerRow.length);
-
+        
         let dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
         dateHeadersRaw.sort((a,b) => a.x - b.x);
-        
         let dateHeaders = [];
         dateHeadersRaw.forEach(dh => {
-            let text = dh.str.trim();
-            if (!dateHeaders.find(d => d.str === text)) {
-                dateHeaders.push({ str: text, x: dh.x });
-            }
+            if (!dateHeaders.find(d => d.str === dh.str)) dateHeaders.push({ str: dh.str, x: dh.x });
         });
 
         let riskNamesList = ["Idrogeologico", "Idraulico", "Temporali", "Neve"];
         let risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < (headerRow.length > 0 ? headerRow[0].x : viewport.width/2));
         risksRows.sort((a,b) => a.y - b.y);
-
         let cleanRisks = [];
         risksRows.forEach(r => {
-            if(!cleanRisks.find(cr => cr.str === r.str && Math.abs(cr.y - r.y) < 10)) {
-                cleanRisks.push(r);
-            }
+            if(!cleanRisks.find(cr => cr.str === r.str && Math.abs(cr.y - r.y) < 10)) cleanRisks.push(r);
         });
-        console.log("Risks labels found:", cleanRisks.length);
 
         let zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
         let zonesRows = [];
         items.forEach(it => {
             let matched = zoneNamesList.find(z => it.str.includes(z) || z.includes(it.str));
-            if(matched && it.y > (parseInt(bestYStr) || 0)) {
-                zonesRows.push({ name: matched, y: it.y, x: it.x });
-            }
+            if(matched && it.y > (parseInt(bestYStr) || 0)) zonesRows.push({ name: matched, y: it.y, x: it.x });
         });
         zonesRows.sort((a,b) => a.y - b.y);
-        
         let cleanZones = [];
         zonesRows.forEach(z => {
             let last = cleanZones[cleanZones.length-1];
-            if(last && (z.y - last.y) < 30) return; 
-            if(cleanZones.length < 7) cleanZones.push(z);
+            if(!last || (z.y - last.y) >= 30) { if(cleanZones.length < 7) cleanZones.push(z); }
         });
-        console.log("Zones found:", cleanZones.length);
-
-
 
         cleanZones.forEach((zone, zIdx) => {
             let zoneAlerts = [];
-            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 60);
+            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 80); // Increased tolerance
             let uniqueRisks = [];
-            relevantRisks.forEach(r => {
-                if(!uniqueRisks.find(ur => ur.str === r.str)) uniqueRisks.push(r);
-            });
+            relevantRisks.forEach(r => { if(!uniqueRisks.find(ur => ur.str === r.str)) uniqueRisks.push(r); });
             
-            if(uniqueRisks.length === 0 && cleanRisks.length >= 28) {
-                 uniqueRisks = cleanRisks.slice(zIdx*4, zIdx*4 + 4);
-            }
+            if(uniqueRisks.length === 0 && cleanRisks.length >= 28) uniqueRisks = cleanRisks.slice(zIdx*4, zIdx*4 + 4);
 
             uniqueRisks.forEach(risk => {
                 let activeSegments = [];
@@ -335,23 +309,17 @@ app.all('/extract', async (req, res) => {
 
                 headerRow.forEach((th, hIdx) => {
                     if (th.str === "Tendenza") return; 
-                    
-                    if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") {
-                        currentDateIdx++;
-                    }
+                    if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") currentDateIdx++;
                     
                     let sampleX = th.x + 10; 
-                    let sampleY = risk.y - 8; 
+                    let sampleY = risk.y - 10; 
                     
-                    // -------------------------------------------------
-                    // COLLISIONE MATEMATICA VETTORIALE (invece di getPixel)
-                    // -------------------------------------------------
                     let foundLevel = null;
-                    for (let rect of coloredRects) {
-                        // Tolleranza abbondante sui bordi per intercettare l'area
-                        if (sampleX >= rect.minX - 15 && sampleX <= rect.maxX + 15 &&
-                            sampleY >= rect.minY - 15 && sampleY <= rect.maxY + 15) {
-                            foundLevel = rect.level;
+                    for (let shape of coloredShapes) {
+                        // Better collision: check if sampling point is within shape with padding
+                        if (sampleX >= shape.minX - 15 && sampleX <= shape.maxX + 15 &&
+                            sampleY >= shape.minY - 20 && sampleY <= shape.maxY + 20) {
+                            foundLevel = shape.level;
                             break;
                         }
                     }
@@ -363,34 +331,18 @@ app.all('/extract', async (req, res) => {
                         let endThStr = "00";
                         let nextH = null;
                         for(let i = hIdx + 1; i < headerRow.length; i++) {
-                            if (headerRow[i].str !== "Tendenza") {
-                                nextH = headerRow[i];
-                                break;
-                            }
+                            if (headerRow[i].str !== "Tendenza") { nextH = headerRow[i]; break; }
                         }
                         
-                        if (nextH) {
-                            endThStr = nextH.str;
-                        } else {
-                            if (th.str === '21') endThStr = '0';
-                            else if (th.str === '15') endThStr = '0'; 
-                            else {
-                                let h = parseInt(th.str);
-                                if(!isNaN(h)) {
-                                     endThStr = String((h + 3) % 24);
-                                }
-                            }
+                        if (nextH) endThStr = nextH.str;
+                        else {
+                            let h = parseInt(th.str);
+                            if(!isNaN(h)) endThStr = String((h + 3) % 24);
                         }
-                        
-                        let startTimeStr = th.str.padStart(2, '0') + ":00";
-                        let endTimeStr = endThStr.padStart(2, '0') + ":00";
                         
                         activeSegments.push({
-                            level: foundLevel,
-                            startDate: dateStrMatch,
-                            endDate: dateStrMatch,
-                            start: startTimeStr,
-                            end: endTimeStr
+                            level: foundLevel, startDate: dateStrMatch, endDate: dateStrMatch,
+                            start: th.str.padStart(2, '0') + ":00", end: endThStr.padStart(2, '0') + ":00"
                         });
                     }
                 });
@@ -400,40 +352,25 @@ app.all('/extract', async (req, res) => {
                     let curr = activeSegments[0];
                     for(let i = 1; i < activeSegments.length; i++) {
                         let nextSeg = activeSegments[i];
-                        let sameDayCont = (curr.level.code === nextSeg.level.code && curr.endDate === nextSeg.startDate && curr.end === nextSeg.start);
-                        let crossMidnightCont = (curr.level.code === nextSeg.level.code && curr.end === "00:00" && nextSeg.start === "00:00");
-                        
-                        if (sameDayCont || crossMidnightCont) {
-                            curr.end = nextSeg.end;
-                            curr.endDate = nextSeg.endDate; 
-                        } else {
-                            merged.push(curr);
-                            curr = nextSeg;
-                        }
+                        if (curr.level.code === nextSeg.level.code && ((curr.endDate === nextSeg.startDate && curr.end === nextSeg.start) || (curr.end === "00:00" && nextSeg.start === "00:00"))) {
+                            curr.end = nextSeg.end; curr.endDate = nextSeg.endDate; 
+                        } else { merged.push(curr); curr = nextSeg; }
                     }
                     merged.push(curr);
                 }
                 
                 merged.forEach(m => {
-                    let alertLabel = "";
-                    if (m.startDate === m.endDate) {
-                        alertLabel = m.startDate + " dalle ore " + m.start.replace(':', '.') + " alle ore " + m.end.replace(':', '.');
-                    } else {
-                        alertLabel = m.startDate + " dalle ore " + m.start.replace(':', '.') + " alle ore " + m.end.replace(':', '.') + " di " + m.endDate;
-                    }
+                    let alertLabel = (m.startDate === m.endDate) ? 
+                        `${m.startDate} dalle ore ${m.start.replace(':', '.')} alle ore ${m.end.replace(':', '.')}` :
+                        `${m.startDate} dalle ore ${m.start.replace(':', '.')} alle ore ${m.end.replace(':', '.')} di ${m.endDate}`;
                     
                     let existingAlert = zoneAlerts.find(a => a.risk === risk.str && a.level.code === m.level.code);
-                    if(existingAlert) {
-                        existingAlert.times.push(alertLabel);
-                    } else {
-                        zoneAlerts.push({ risk: risk.str, level: m.level, times: [alertLabel] });
-                    }
+                    if(existingAlert) existingAlert.times.push(alertLabel);
+                    else zoneAlerts.push({ risk: risk.str, level: m.level, times: [alertLabel] });
                 });
             });
 
-            if(zoneAlerts.length > 0) {
-                alertZonesFound.push({ zone: zone.name, alerts: zoneAlerts });
-            }
+            if(zoneAlerts.length > 0) alertZonesFound.push({ zone: zone.name, alerts: zoneAlerts });
         });
 
         // -------------------------------------------------------------
