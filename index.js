@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDocument } = require('pdfjs-dist/legacy/build/pdf.js');
+const { getDocument, OPS } = require('pdfjs-dist/legacy/build/pdf.js');
 const { createCanvas } = require('canvas');
 
 const app = express();
@@ -11,7 +11,7 @@ class NodeCanvasFactory {
         const canvas = createCanvas(width, height);
         const context = canvas.getContext('2d');
         
-        // INTERCEPT CLEARRECT: Impediamo a PDF.js di rendere la tela trasparente
+        // INTERCEPT CLEARRECT: Prevent PDF.js from making the canvas transparent
         const originalClearRect = context.clearRect;
         context.clearRect = function(x, y, w, h) {
             originalClearRect.call(this, x, y, w, h);
@@ -408,7 +408,7 @@ app.post('/extract', async (req, res) => {
     }
 });
 
-app.get('/debug-image', async (req, res) => {
+app.get('/debug-ops', async (req, res) => {
     try {
         const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
         
@@ -422,24 +422,75 @@ app.get('/debug-image', async (req, res) => {
         });
         const pdf = await loadingTask.promise;
         const page = await pdf.getPage(1);
-        const viewport = page.getViewport({ scale: 1.5 });
         
-        const canvasFactory = new NodeCanvasFactory();
-        const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
-        const ctx = canvasAndContext.context;
+        const ops = await page.getOperatorList();
         
-        await page.render({ 
-            canvasContext: ctx, 
-            viewport: viewport,
-            canvasFactory: canvasFactory
-        }).promise;
-
-        const buffer = canvasAndContext.canvas.toBuffer('image/png');
-        res.type('image/png');
-        res.send(buffer);
+        let shapes = [];
+        let curColor = null;
+        let curPath = [];
+        
+        // Reverse engineer OPS map
+        let opNames = {};
+        for (let k in OPS) { opNames[OPS[k]] = k; }
+        
+        let recentOps = [];
+        
+        for (let i = 0; i < ops.fnArray.length; i++) {
+            const fn = ops.fnArray[i];
+            const args = ops.argsArray[i];
+            const opName = opNames[fn];
+            
+            // setFillRGBColor
+            if (opName === 'setFillRGBColor' || opName === 'setStrokeRGBColor') {
+                curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
+            }
+            // CMYK
+            if (opName === 'setFillCMYKColor') {
+                curColor = { cmyk: args };
+            }
+            
+            // Collect path ops
+            if (opName === 'rectangle') {
+                curPath.push({ type: 'rect', args: args });
+            }
+            if (opName === 'moveTo' || opName === 'lineTo') {
+                curPath.push({ type: opName, args: args });
+            }
+            
+            // When filled, log the color
+            if (opName === 'fill' || opName === 'eoFill' || opName === 'stroke') {
+                if (curColor && curPath.length > 0) {
+                    // Only care about colored things
+                    if (curColor.r !== undefined && (curColor.r > 100 || curColor.g > 100)) {
+                        shapes.push({
+                            color: curColor,
+                            path: curPath.slice()
+                        });
+                    }
+                }
+                curPath = [];
+            }
+            
+            if (opName === 'endPath') {
+                curPath = [];
+            }
+            
+            if (i < 500) { // Just get the first few for a summary
+                recentOps.push({ op: opName, args: args });
+            }
+        }
+        
+        const textContentPage = await page.getTextContent();
+        const texts = textContentPage.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] })).filter(t => t.str.trim().length > 0);
+        
+        res.json({
+            foundColoredShapes: shapes.length,
+            shapes: shapes,
+            first500Ops: recentOps
+        });
         
     } catch (err) {
-        res.status(500).send("Error: " + err.message);
+        res.status(500).json({ error: err.message, stack: err.stack });
     }
 });
 
