@@ -384,19 +384,89 @@ app.get('/auto-extract', async (req, res) => {
     }
 });
 
-// DEBUG ENDPOINT: Returns the actual PNG of the rendered PDF
+// DEBUG ENDPOINT: Returns the actual PNG of the rendered PDF with visual hitboxes
 app.get('/debug-image', async (req, res) => {
     try {
         const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
         const response = await fetch(pdfUrl);
         const arrayBuffer = await response.arrayBuffer();
-        const loadingTask = getDocument({ data: new Uint8Array(arrayBuffer), disableFontFace: true });
+        const loadingTask = getDocument({ data: new Uint8Array(arrayBuffer), disableFontFace: false });
         const pdf = await loadingTask.promise;
         const page = await pdf.getPage(1);
         const viewport = page.getViewport({ scale: 1.5 });
         const canvasFactory = new NodeCanvasFactory();
         const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
+        
         await page.render({ canvasContext: ctx, viewport, canvasFactory }).promise;
+        
+        // REPLICATE HITBOX LOGIC FOR VISUALIZATION
+        const textContentPage = await page.getTextContent();
+        const items = textContentPage.items.map(it => {
+            const pt = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+            return { str: it.str.trim(), x: pt[0], y: pt[1] };
+        }).filter(it => it.str.length > 0);
+
+        const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15", "Tendenza"];
+        let timeHeaders = items.filter(it => hoursKeys.includes(it.str) && it.y > viewport.height / 2);
+        
+        let yGroups = {};
+        timeHeaders.forEach(it => {
+            let gy = Math.round(it.y / 10) * 10;
+            if(!yGroups[gy]) yGroups[gy] = [];
+            yGroups[gy].push(it);
+        });
+        let bestYStr = Object.keys(yGroups).sort((a,b) => yGroups[b].length - yGroups[a].length)[0];
+        let headerRow = bestYStr ? yGroups[bestYStr].sort((a,b) => a.x - b.x) : [];
+
+        const riskNamesList = ["Idrogeologico", "Idraulico", "Temporali", "Neve"];
+        const risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < (headerRow.length > 0 ? headerRow[0].x : viewport.width/2)).sort((a,b) => b.y - a.y);
+        
+        let cleanRisks = [];
+        risksRows.forEach(r => {
+            if(!cleanRisks.find(cr => cr.str === r.str && Math.abs(cr.y - r.y) < 10)) {
+                cleanRisks.push(r);
+            }
+        });
+
+        const zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
+        let zonesRows = [];
+        items.forEach(it => {
+            let matched = zoneNamesList.find(z => it.str.includes(z) || z.includes(it.str));
+            if(matched && it.y < (parseInt(bestYStr) || viewport.height)) { 
+                zonesRows.push({ name: matched, y: it.y, x: it.x });
+            }
+        });
+        zonesRows.sort((a,b) => b.y - a.y);
+        
+        const cleanZones = [];
+        zonesRows.forEach(z => {
+            const last = cleanZones[cleanZones.length-1];
+            if(last && Math.abs(z.y - last.y) < 30) return; 
+            if(cleanZones.length < 7) cleanZones.push(z);
+        });
+
+        // DRAW DEBUG MARKERS
+        cleanZones.forEach((zone, zIdx) => {
+            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 60);
+            let uniqueRisks = [];
+            relevantRisks.forEach(r => { if(!uniqueRisks.find(ur => ur.str === r.str)) uniqueRisks.push(r); });
+            if(uniqueRisks.length === 0 && cleanRisks.length >= 28) uniqueRisks = cleanRisks.slice(zIdx*4, zIdx*4 + 4);
+            
+            uniqueRisks.forEach(risk => {
+                headerRow.forEach((th, hIdx) => {
+                    if (th.str === "Tendenza") return;
+                    
+                    let canvasY = viewport.height - risk.y - 8;
+                    const sx = th.x + 10;
+                    const sy = canvasY;
+                    
+                    // Disegna un quadrato rosso semitrasparente dove lo script cerca i colori
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+                    ctx.fillRect(sx - 2, sy - 2, 5, 5); 
+                });
+            });
+        });
+        
         res.type('image/png').send(canvas.toBuffer());
     } catch (e) { res.status(500).send(e.message); }
 });
