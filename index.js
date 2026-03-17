@@ -132,6 +132,27 @@ app.all('/extract', async (req, res) => {
         let curColor = null;
         let curPath = [];
         
+        let ctm = [1, 0, 0, 1, 0, 0];
+        let ctmStack = [];
+
+        function transformMatrix(m1, m2) {
+            return [
+                m1[0] * m2[0] + m1[2] * m2[1],
+                m1[1] * m2[0] + m1[3] * m2[1],
+                m1[0] * m2[2] + m1[2] * m2[3],
+                m1[1] * m2[2] + m1[3] * m2[3],
+                m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+                m1[1] * m2[4] + m1[3] * m2[5] + m1[5]
+            ];
+        }
+
+        function transformPoint(m, x, y) {
+            return [
+                x * m[0] + y * m[2] + m[4],
+                x * m[1] + y * m[3] + m[5]
+            ];
+        }
+
         const levelsMap = {
             'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
             'arancione': { name: 'Arancione (Moderata criticità)', code: 'arancione' },
@@ -143,6 +164,16 @@ app.all('/extract', async (req, res) => {
             const args = ops.argsArray[i];
             const opName = opNames[fn];
             
+            if (opName === 'save') {
+                ctmStack.push([...ctm]);
+            }
+            if (opName === 'restore') {
+                ctm = ctmStack.pop();
+            }
+            if (opName === 'transform') {
+                ctm = transformMatrix(ctm, args);
+            }
+            
             if (opName === 'setFillRGBColor' || opName === 'setStrokeRGBColor') {
                 curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
             }
@@ -153,12 +184,27 @@ app.all('/extract', async (req, res) => {
             if (opName === 'constructPath') {
                 const pathOps = args[0];
                 const pathArgs = args[1];
-                if (pathOps && pathOps[0] === 19) {
-                    curPath.push({ type: 'rect', args: pathArgs });
+                let argIdx = 0;
+                for (let op of pathOps) {
+                    if (op === 19) { // RECT opcode
+                        curPath.push({ 
+                            type: 'rect', 
+                            x: pathArgs[argIdx], 
+                            y: pathArgs[argIdx+1], 
+                            w: pathArgs[argIdx+2], 
+                            h: pathArgs[argIdx+3],
+                            ctm: [...ctm]
+                        });
+                        argIdx += 4;
+                    } else if (op === 0 || op === 1) { // moveTo, lineTo
+                        argIdx += 2;
+                    } else if (op === 2 || op === 3) { // curveTo, curveTo2
+                        argIdx += 6;
+                    }
                 }
             }
             if (opName === 'rectangle') {
-                curPath.push({ type: 'rect', args: args });
+                curPath.push({ type: 'rect', x: args[0], y: args[1], w: args[2], h: args[3], ctm: [...ctm] });
             }
             
             if (opName === 'fill' || opName === 'eoFill' || opName === 'stroke') {
@@ -171,18 +217,24 @@ app.all('/extract', async (req, res) => {
                     if (foundLevel) {
                         for (let p of curPath) {
                             if (p.type === 'rect') {
-                                let unscaledX = p.args[0];
-                                let unscaledY = p.args[1];
-                                let unscaledW = p.args[2];
-                                let unscaledH = p.args[3];
+                                // Apply the CTM from the exact moment the rectangle was inserted!
+                                let pt1 = transformPoint(p.ctm, p.x, p.y);
+                                let pt2 = transformPoint(p.ctm, p.x + p.w, p.y);
+                                let pt3 = transformPoint(p.ctm, p.x, p.y + p.h);
+                                let pt4 = transformPoint(p.ctm, p.x + p.w, p.y + p.h);
                                 
-                                let pt1 = viewport.convertToViewportPoint(unscaledX, unscaledY);
-                                let pt2 = viewport.convertToViewportPoint(unscaledX + unscaledW, unscaledY + unscaledH);
+                                let vp1 = viewport.convertToViewportPoint(pt1[0], pt1[1]);
+                                let vp2 = viewport.convertToViewportPoint(pt2[0], pt2[1]);
+                                let vp3 = viewport.convertToViewportPoint(pt3[0], pt3[1]);
+                                let vp4 = viewport.convertToViewportPoint(pt4[0], pt4[1]);
                                 
-                                let minX = Math.min(pt1[0], pt2[0]);
-                                let maxX = Math.max(pt1[0], pt2[0]);
-                                let minY = Math.min(pt1[1], pt2[1]);
-                                let maxY = Math.max(pt1[1], pt2[1]);
+                                let xs = [vp1[0], vp2[0], vp3[0], vp4[0]];
+                                let ys = [vp1[1], vp2[1], vp3[1], vp4[1]];
+                                
+                                let minX = Math.min(...xs);
+                                let maxX = Math.max(...xs);
+                                let minY = Math.min(...ys);
+                                let maxY = Math.max(...ys);
                                 
                                 coloredRects.push({
                                     level: foundLevel,
