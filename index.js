@@ -83,6 +83,10 @@ app.all('/extract', async (req, res) => {
         const canvasFactory = new NodeCanvasFactory();
         const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
         
+        // FORZA LO SFONDO BIANCO PRIMA DEL RENDER
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
         await page1.render({ 
             canvasContext: ctx, 
             viewport: viewport,
@@ -396,6 +400,10 @@ app.get('/debug-image', async (req, res) => {
         const viewport = page.getViewport({ scale: 1.5 });
         const canvasFactory = new NodeCanvasFactory();
         const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
+        
+        // FORZA LO SFONDO BIANCO PRIMA DEL RENDER
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         
         await page.render({ canvasContext: ctx, viewport, canvasFactory }).promise;
         
