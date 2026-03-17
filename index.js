@@ -37,9 +37,9 @@ class NodeCanvasFactory {
     }
 }
 
-app.post('/extract', async (req, res) => {
+app.all('/extract', async (req, res) => {
     try {
-        const pdfUrl = req.body.pdfUrl;
+        const pdfUrl = req.method === 'POST' ? req.body.pdfUrl : req.query.pdfUrl;
         
         if (!pdfUrl) {
             return res.status(400).json({ error: "Campo 'pdfUrl' mancante nel JSON della richiesta." });
@@ -118,30 +118,90 @@ app.post('/extract', async (req, res) => {
         if (mFineAvviso) fineAvviso = mFineAvviso[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
 
         // -------------------------------------------------------------
-        // Server-Side Canvas Render
+        // Estrazione Vettoriale Pura (Zero Bug Grafici Linux)
         // -------------------------------------------------------------
-        console.log("Avvio render grafico su virtual Canvas...");
+        console.log("Avvio scansione vettoriale PDF bypassando la grafica...");
         const page1 = await pdf.getPage(1);
         const viewport = page1.getViewport({ scale: 1.5 }); 
         
-        const canvasFactory = new NodeCanvasFactory();
-        const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
-        const ctx = canvasAndContext.context;
+        const ops = await page1.getOperatorList();
+        let opNames = {};
+        for (let k in OPS) { opNames[OPS[k]] = k; }
         
-        await page1.render({ 
-            canvasContext: ctx, 
-            viewport: viewport,
-            canvasFactory: canvasFactory
-        }).promise;
+        let coloredRects = [];
+        let curColor = null;
+        let curPath = [];
         
-        console.log("Render completato: Size", viewport.width, "x", viewport.height);
-        
-        const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height).data;
+        const levelsMap = {
+            'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
+            'arancione': { name: 'Arancione (Moderata criticità)', code: 'arancione' },
+            'rosso': { name: 'Rosso (Elevata criticità)', code: 'rosso' }
+        };
 
-        function getPixel(x, y) {
-            const i = (Math.floor(y) * Math.floor(viewport.width) + Math.floor(x)) * 4;
-            return { r: imgData[i], g: imgData[i+1], b: imgData[i+2], a: imgData[i+3] };
+        for (let i = 0; i < ops.fnArray.length; i++) {
+            const fn = ops.fnArray[i];
+            const args = ops.argsArray[i];
+            const opName = opNames[fn];
+            
+            if (opName === 'setFillRGBColor' || opName === 'setStrokeRGBColor') {
+                curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
+            }
+            if (opName === 'setFillCMYKColor') {
+                curColor = { cmyk: args }; 
+            }
+            
+            if (opName === 'constructPath') {
+                const pathOps = args[0];
+                const pathArgs = args[1];
+                if (pathOps && pathOps[0] === 19) {
+                    curPath.push({ type: 'rect', args: pathArgs });
+                }
+            }
+            if (opName === 'rectangle') {
+                curPath.push({ type: 'rect', args: args });
+            }
+            
+            if (opName === 'fill' || opName === 'eoFill' || opName === 'stroke') {
+                if (curColor && curPath.length > 0) {
+                    let foundLevel = null;
+                    if (curColor.r > 200 && curColor.g > 200 && curColor.b < 100) foundLevel = levelsMap['giallo'];
+                    else if (curColor.r > 200 && curColor.g > 100 && curColor.g < 200 && curColor.b < 100) foundLevel = levelsMap['arancione'];
+                    else if (curColor.r > 200 && curColor.g < 100 && curColor.b < 100) foundLevel = levelsMap['rosso'];
+                    
+                    if (foundLevel) {
+                        for (let p of curPath) {
+                            if (p.type === 'rect') {
+                                let unscaledX = p.args[0];
+                                let unscaledY = p.args[1];
+                                let unscaledW = p.args[2];
+                                let unscaledH = p.args[3];
+                                
+                                let pt1 = viewport.convertToViewportPoint(unscaledX, unscaledY);
+                                let pt2 = viewport.convertToViewportPoint(unscaledX + unscaledW, unscaledY + unscaledH);
+                                
+                                let minX = Math.min(pt1[0], pt2[0]);
+                                let maxX = Math.max(pt1[0], pt2[0]);
+                                let minY = Math.min(pt1[1], pt2[1]);
+                                let maxY = Math.max(pt1[1], pt2[1]);
+                                
+                                coloredRects.push({
+                                    level: foundLevel,
+                                    centerX: (minX + maxX) / 2,
+                                    centerY: (minY + maxY) / 2,
+                                    minX, maxX, minY, maxY
+                                });
+                            }
+                        }
+                    }
+                }
+                curPath = [];
+            }
+            if (opName === 'endPath') {
+                curPath = [];
+            }
         }
+        
+        console.log(`Trovati ${coloredRects.length} rettangoli di allerta puri nel codice del PDF.`);
 
         const textContentPage = await page1.getTextContent();
         const items = textContentPage.items.map(it => {
@@ -203,11 +263,7 @@ app.post('/extract', async (req, res) => {
         });
         console.log("Zones found:", cleanZones.length);
 
-        const levelsMap = {
-            'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
-            'arancione': { name: 'Arancione (Moderata criticità)', code: 'arancione' },
-            'rosso': { name: 'Rosso (Elevata criticità)', code: 'rosso' }
-        };
+
 
         cleanZones.forEach((zone, zIdx) => {
             let zoneAlerts = [];
@@ -235,37 +291,18 @@ app.post('/extract', async (req, res) => {
                     let sampleX = th.x + 10; 
                     let sampleY = risk.y - 8; 
                     
-                    // DEBUG: DUMP THE MIDDLE OF THE FIRST RISK OF FIRST ZONE
-                    if (zIdx === 0 && risk === uniqueRisks[0] && hIdx === 4) {
-                        console.log(`\n\n[DEBUG PIXEL] Testing ${zone.name} -> ${risk.str} at ${th.str}:00`);
-                        console.log(`[DEBUG PIXEL] Exact coordinate sampled: X:${sampleX}, Y:${sampleY}`);
-                        let centerPx = getPixel(sampleX, sampleY);
-                        console.log(`[DEBUG PIXEL] Center RGB: (${centerPx.r}, ${centerPx.g}, ${centerPx.b})`);
-                    }
-
+                    // -------------------------------------------------
+                    // COLLISIONE MATEMATICA VETTORIALE (invece di getPixel)
+                    // -------------------------------------------------
                     let foundLevel = null;
-                        for(let dx = -4; dx <= 4; dx += 2) {
-                            for(let dy = -4; dy <= 4; dy += 2) {
-                                let px = getPixel(sampleX + dx, sampleY + dy);
-                                
-                                // TOLLERANZA ESTREMA PER SERVER LINUX (Vercel/Render)
-                                // Giallo
-                                if(px.r > 130 && px.g > 130 && px.b < 180 && px.r > px.b + 50) { 
-                                    foundLevel = levelsMap['giallo']; 
-                                }
-                                // Arancione
-                                else if(px.r > 130 && px.g > 60 && px.g < 200 && px.b < 150 && px.r > px.g + 30) { 
-                                    foundLevel = levelsMap['arancione']; 
-                                }
-                                // Rosso intenso
-                                else if(px.r > 130 && px.g < 100 && px.b < 100) { 
-                                    foundLevel = levelsMap['rosso']; 
-                                }
-                                
-                                if(foundLevel) break;
-                            }
-                            if(foundLevel) break;
+                    for (let rect of coloredRects) {
+                        // Tolleranza abbondante sui bordi per intercettare l'area
+                        if (sampleX >= rect.minX - 15 && sampleX <= rect.maxX + 15 &&
+                            sampleY >= rect.minY - 15 && sampleY <= rect.maxY + 15) {
+                            foundLevel = rect.level;
+                            break;
                         }
+                    }
 
                     if(foundLevel) {
                         let dIdx = Math.min(currentDateIdx, Math.max(0, dateHeaders.length - 1));
@@ -405,6 +442,41 @@ app.post('/extract', async (req, res) => {
     } catch (err) {
         console.error("Errore Generico API:", err);
         res.status(500).json({ error: err.message, stack: err.stack });
+    }
+});
+
+app.get('/debug-image', async (req, res) => {
+    try {
+        const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
+        
+        const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const arrayBuffer = await response.arrayBuffer();
+        
+        const loadingTask = getDocument({
+            data: new Uint8Array(arrayBuffer),
+            disableFontFace: true,
+            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
+        });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.5 });
+        
+        const canvasFactory = new NodeCanvasFactory();
+        const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
+        const ctx = canvasAndContext.context;
+        
+        await page.render({ 
+            canvasContext: ctx, 
+            viewport: viewport,
+            canvasFactory: canvasFactory
+        }).promise;
+
+        const buffer = canvasAndContext.canvas.toBuffer('image/png');
+        res.type('image/png');
+        res.send(buffer);
+        
+    } catch (err) {
+        res.status(500).send("Error: " + err.message);
     }
 });
 
