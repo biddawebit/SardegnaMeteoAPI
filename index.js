@@ -90,7 +90,8 @@ app.all('/extract', async (req, res) => {
         await page1.render({ 
             canvasContext: ctx, 
             viewport: viewport,
-            canvasFactory: canvasFactory
+            canvasFactory: canvasFactory,
+            background: 'rgba(255, 255, 255, 1)'
         }).promise;
 
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -405,7 +406,12 @@ app.get('/debug-image', async (req, res) => {
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         
-        await page.render({ canvasContext: ctx, viewport, canvasFactory }).promise;
+        await page.render({ 
+            canvasContext: ctx, 
+            viewport, 
+            canvasFactory,
+            background: 'rgba(255, 255, 255, 1)'
+        }).promise;
         
         // REPLICATE HITBOX LOGIC FOR VISUALIZATION
         const textContentPage = await page.getTextContent();
