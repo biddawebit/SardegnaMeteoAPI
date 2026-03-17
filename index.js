@@ -402,11 +402,10 @@ app.post('/extract', async (req, res) => {
     }
 });
 
-app.post('/debug-image', async (req, res) => {
+app.get('/debug-image', async (req, res) => {
     try {
-        const pdfUrl = req.body.pdfUrl;
-        if (!pdfUrl) return res.status(400).send("No pdfUrl");
-
+        const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
+        
         const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         const arrayBuffer = await response.arrayBuffer();
         
