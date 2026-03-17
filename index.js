@@ -197,9 +197,87 @@ app.all('/extract', async (req, res) => {
         console.log("Feed XML generato con successo (Metodo Ibrido).");
         
         res.type('application/xml').send(xml);
+        console.log("Feed XML generato con successo (Metodo Ibrido).");
+        
     } catch (err) {
-        console.error(err);
-        res.status(500).send(err.message);
+        console.error("Errore /extract:", err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Endpoint automatico richiesto per Make.com
+app.get('/auto-extract', async (req, res) => {
+    try {
+        console.log("Avvio AUTO-EXTRACT dal feed Regionale...");
+        
+        // 1. Scarica l'XML
+        const feedUrl = 'https://www.sardegnaambiente.it/servizi/allertediprotezionecivile/rss/idrogeologico.xml';
+        const response = await fetch(feedUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        if (!response.ok) throw new Error(`Errore di connessione al Feed XML: ${response.status}`);
+        
+        const xmlText = await response.text();
+        
+        // 2. Parsa l'XML usando regex (per non richiedere dipendenze esterne come fast-xml-parser o xml2js)
+        const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+        let match;
+        let targetPdfUrl = null;
+        let foundTitle = "";
+        
+        while ((match = itemRegex.exec(xmlText)) !== null) {
+            const itemContent = match[1];
+            
+            // Estrai titolo e link dell'item
+            const titleMatch = itemContent.match(/<title>([\s\S]*?)<\/title>/);
+            const linkMatch = itemContent.match(/<link>([\s\S]*?)<\/link>/);
+            
+            if (titleMatch && linkMatch) {
+                const titleStr = titleMatch[1].trim();
+                const linkStr = linkMatch[1].trim();
+                
+                // Cerca solo gli "Avviso di Criticità" 
+                if (titleStr.toLowerCase().includes("avviso di criticita") || 
+                    titleStr.toLowerCase().includes("avviso di criticità") ||
+                    titleStr.toLowerCase().includes("bollettino di criticita") || 
+                    titleStr.toLowerCase().includes("bollettino di criticità")) {
+                    
+                    targetPdfUrl = linkStr.replace(/ /g, '%20');
+                    foundTitle = titleStr;
+                    break; // Trovato il più recente, mi fermo
+                }
+            }
+        }
+        
+        if (!targetPdfUrl) {
+            return res.status(404).json({ success: false, error: "Nessun Avviso o Bollettino di Criticità trovato nell'XML." });
+        }
+        
+        console.log(`Trovato PDF da analizzare: [${foundTitle}] - ${targetPdfUrl}`);
+        
+        // 3. Richiama l'estrattore passandogli l'URL trovato (simula una chiamata interna)
+        // Crea un mock request inietandogli il file
+        const internalReq = { method: 'GET', query: { pdfUrl: targetPdfUrl } };
+        
+        // Dobbiamo estrarre la logica di /extract in una funzione per riutilizzarla pulita
+        // Siccome l'abbiamo incorporata nella rotta, posso fare un fetch a me stesso
+        // Ma per non bloccare process.env.PORT, lo importo così:
+        const baseUrl = `http://localhost:${process.env.PORT || 3000}`;
+        const extractRes = await fetch(`${baseUrl}/extract?pdfUrl=${encodeURIComponent(targetPdfUrl)}`);
+        
+        if (!extractRes.ok) {
+            const errText = await extractRes.text();
+            throw new Error(`Errore durante l'estrazione OCR/PDF: ${errText}`);
+        }
+        
+        // Restituisci a Make.com il risultato in JSON se preferisci, oppure l'XML generato.
+        // L'API /extract al momento restituisce XML. In Make.com ti è utile JSON.
+        // Convertiamo al volo la risposta JSON se Make.com lo predilige? 
+        // L'utente aveva l'XML come stringa ma con JS ha un output. Mando indietro l'XML che Make.com sa parsare
+        const finalXml = await extractRes.text();
+        res.type('application/xml').send(finalXml);
+        
+    } catch (err) {
+        console.error("Errore /auto-extract:", err);
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
