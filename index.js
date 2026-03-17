@@ -123,15 +123,17 @@ app.post('/extract', async (req, res) => {
             canvasFactory: canvasFactory
         }).promise;
         
-        // IMPORTANT: PDF.js overwrites the canvas, so we must add the white background AFTER rendering
-        ctx.globalCompositeOperation = 'destination-over';
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, viewport.width, viewport.height);
-        ctx.globalCompositeOperation = 'source-over';
+        // 100% BULLETPROOF WHITE BACKGROUND
+        // Create a brand new, clean canvas to avoid any PDF.js clipping paths
+        const finalCanvas = createCanvas(viewport.width, viewport.height);
+        const finalCtx = finalCanvas.getContext('2d');
+        finalCtx.fillStyle = 'white';
+        finalCtx.fillRect(0, 0, viewport.width, viewport.height);
+        finalCtx.drawImage(canvasAndContext.canvas, 0, 0);
         
         console.log("Render completato: Size", viewport.width, "x", viewport.height);
         
-        const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height).data;
+        const imgData = finalCtx.getImageData(0, 0, viewport.width, viewport.height).data;
 
         function getPixel(x, y) {
             const i = (Math.floor(y) * Math.floor(viewport.width) + Math.floor(x)) * 4;
@@ -429,13 +431,14 @@ app.get('/debug-image', async (req, res) => {
             canvasFactory: canvasFactory
         }).promise;
 
-        // Force white background AFTER rendering
-        ctx.globalCompositeOperation = 'destination-over';
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, viewport.width, viewport.height);
-        ctx.globalCompositeOperation = 'source-over';
+        // 100% BULLETPROOF WHITE BACKGROUND
+        const finalCanvas = createCanvas(viewport.width, viewport.height);
+        const finalCtx = finalCanvas.getContext('2d');
+        finalCtx.fillStyle = 'white';
+        finalCtx.fillRect(0, 0, viewport.width, viewport.height);
+        finalCtx.drawImage(canvasAndContext.canvas, 0, 0);
         
-        const buffer = canvasAndContext.canvas.toBuffer('image/png');
+        const buffer = finalCanvas.toBuffer('image/png');
         res.type('image/png');
         res.send(buffer);
         
