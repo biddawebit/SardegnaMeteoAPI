@@ -103,26 +103,52 @@ app.all('/extract', async (req, res) => {
             return { str: it.str.trim(), x: pt[0], y: pt[1] };
         }).filter(it => it.str.length > 0);
 
-        // Identificazione degli ancoraggi testuali (anche se non renderizzati visivamente)
-        const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15"];
-        const headerRow = items.filter(it => hoursKeys.includes(it.str) && it.y < viewport.height / 2).sort((a,b) => a.x - b.x);
+        // Trova gli orari dell'intestazione
+        const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15", "Tendenza"];
+        let timeHeaders = items.filter(it => hoursKeys.includes(it.str) && it.y > viewport.height / 2); // In Node.js (0,0) is bottom-left, so headers are near top (y > height/2)
         
-        const dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
+        // Raggruppa per riga Y
+        let yGroups = {};
+        timeHeaders.forEach(it => {
+            let gy = Math.round(it.y / 10) * 10;
+            if(!yGroups[gy]) yGroups[gy] = [];
+            yGroups[gy].push(it);
+        });
+        let bestYStr = Object.keys(yGroups).sort((a,b) => yGroups[b].length - yGroups[a].length)[0];
+        let headerRow = bestYStr ? yGroups[bestYStr].sort((a,b) => a.x - b.x) : [];
+
+        // Trova le Date nell'intestazione
+        let dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
         dateHeadersRaw.sort((a,b) => a.x - b.x);
         const dateHeaders = [];
         dateHeadersRaw.forEach(dh => { if (!dateHeaders.find(d => d.str === dh.str)) dateHeaders.push({ str: dh.str, x: dh.x }); });
 
         const riskNamesList = ["Idrogeologico", "Idraulico", "Temporali", "Neve"];
-        const risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < viewport.width/4).sort((a,b) => a.y - b.y);
+        // In Node.js/pdf.js (0,0) is bottom left! So elements below header have y < headerY
+        const risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < (headerRow.length > 0 ? headerRow[0].x : viewport.width/2)).sort((a,b) => b.y - a.y);
         
+        let cleanRisks = [];
+        risksRows.forEach(r => {
+            if(!cleanRisks.find(cr => cr.str === r.str && Math.abs(cr.y - r.y) < 10)) {
+                cleanRisks.push(r);
+            }
+        });
+
         const zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
-        const zonesRows = items.filter(it => zoneNamesList.some(z => it.str.includes(z))).sort((a,b) => a.y - b.y);
+        let zonesRows = [];
+        items.forEach(it => {
+            let matched = zoneNamesList.find(z => it.str.includes(z) || z.includes(it.str));
+            if(matched && it.y < (parseInt(bestYStr) || viewport.height)) { 
+                zonesRows.push({ name: matched, y: it.y, x: it.x });
+            }
+        });
+        zonesRows.sort((a,b) => b.y - a.y); // Dall'alto verso il basso (Y decrescente)
         
         const cleanZones = [];
         zonesRows.forEach(z => {
-            const matchedName = zoneNamesList.find(name => z.str.includes(name));
             const last = cleanZones[cleanZones.length-1];
-            if(!last || (z.y - last.y) >= 30) { if(cleanZones.length < 7) cleanZones.push({ name: matchedName, y: z.y }); }
+            if(last && Math.abs(z.y - last.y) < 30) return; 
+            if(cleanZones.length < 7) cleanZones.push(z);
         });
 
         const alertZonesFound = [];
@@ -130,17 +156,36 @@ app.all('/extract', async (req, res) => {
         // CAMPIONAMENTO IBRIDO: Usa le coordinate del testo per pescare il colore
         cleanZones.forEach((zone, zIdx) => {
             const zoneAlerts = [];
-            const relevantRisks = risksRows.filter(r => Math.abs(r.y - zone.y) < 100).slice(0, 4);
+            // I rischi appartenenti a questa zona sono quelli con Y simile. In Node.js Y diminuisce scendendo.
+            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 60);
             
-            relevantRisks.forEach(risk => {
+            let uniqueRisks = [];
+            relevantRisks.forEach(r => {
+                if(!uniqueRisks.find(ur => ur.str === r.str)) uniqueRisks.push(r);
+            });
+            
+            if(uniqueRisks.length === 0 && cleanRisks.length >= 28) {
+                 uniqueRisks = cleanRisks.slice(zIdx*4, zIdx*4 + 4);
+            }
+            
+            uniqueRisks.forEach(risk => {
                 const results = [];
                 let currentDateIdx = 0;
 
                 headerRow.forEach((th, hIdx) => {
-                    if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") currentDateIdx++;
+                    if (th.str === "Tendenza") return;
                     
+                    if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") {
+                        currentDateIdx++;
+                    }
+                    
+                    // Il canvas di Node.js (node-canvas) ha Y=0 IN ALTO!
+                    // Ma PDF.js viewport.convertToViewportPoint() mappa su canvas con Y invertito o no in Node?
+                    // In node-canvas l'origine è in alto a sinistra. PDF.js in Node restituisce viewport coords (0,0 bottom-left).
+                    // Dobbiamo invertire la Y per node-canvas:
+                    let canvasY = viewport.height - risk.y - 8;
                     const sx = th.x + 10;
-                    const sy = risk.y - 8;
+                    const sy = canvasY;
                     let foundLevel = null;
                     
                     // Scansione locale per robustezza contro piccoli disallineamenti come nel PHP
@@ -162,8 +207,10 @@ app.all('/extract', async (req, res) => {
                         let endThStr = "00";
                         let nextH = null;
                         for(let i = hIdx + 1; i < headerRow.length; i++) {
-                            nextH = headerRow[i];
-                            break;
+                            if (headerRow[i].str !== "Tendenza") {
+                                nextH = headerRow[i];
+                                break;
+                            }
                         }
                         
                         if (nextH) {
@@ -213,7 +260,6 @@ app.all('/extract', async (req, res) => {
                 }
 
                 if(merged.length > 0) {
-                    // Aggregazione per item XML
                     zoneAlerts.push({ risk: risk.str, detections: merged });
                 }
             });
