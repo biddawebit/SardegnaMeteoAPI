@@ -11,27 +11,26 @@ class NodeCanvasFactory {
         const canvas = createCanvas(width, height);
         const context = canvas.getContext('2d');
         
-        // INTERCEPT CLEARRECT: Prevent PDF.js from making the canvas transparent
-        const originalClearRect = context.clearRect;
-        context.clearRect = function(x, y, w, h) {
-            originalClearRect.call(this, x, y, w, h);
-            this.fillStyle = 'white';
-            this.fillRect(x, y, w, h);
-        };
-        
+        // Solid white background
         context.fillStyle = 'white';
         context.fillRect(0, 0, width, height);
+        
+        // Redirect clearRect to fillRect with white to prevent transparency
+        context.clearRect = (x, y, w, h) => {
+            context.fillStyle = 'white';
+            context.fillRect(x, y, w, h);
+        };
+        
         return { canvas, context };
     }
     reset(canvasAndContext, width, height) {
         canvasAndContext.canvas.width = width;
         canvasAndContext.canvas.height = height;
-        canvasAndContext.context.fillStyle = 'white';
-        canvasAndContext.context.fillRect(0, 0, width, height);
+        const ctx = canvasAndContext.context;
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, width, height);
     }
     destroy(canvasAndContext) {
-        canvasAndContext.canvas.width = 0;
-        canvasAndContext.canvas.height = 0;
         canvasAndContext.canvas = null;
         canvasAndContext.context = null;
     }
@@ -51,8 +50,9 @@ app.all('/extract', async (req, res) => {
 
         const loadingTask = getDocument({
             data: uint8Array,
-            disableFontFace: true,
-            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
+            disableFontFace: false, // Enable embedded fonts for better layout parity
+            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`,
+            isEvalSupported: false
         });
         const pdf = await loadingTask.promise;
         
@@ -77,18 +77,24 @@ app.all('/extract', async (req, res) => {
         const inizio = (normalizedText.match(patterns.inizio) || [])[1] || "N/A";
         const fine = (normalizedText.match(patterns.fine) || [])[1] || "N/A";
 
-        // 3. PIXEL-PERFECT CLASSIFICATION
+        // 3. PIXEL-PERFECT HYBRID CLASSIFICATION
         const page1 = await pdf.getPage(1);
         const viewport = page1.getViewport({ scale: 1.5 });
         const canvasFactory = new NodeCanvasFactory();
         const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
         
-        await page1.render({ canvasContext: ctx, viewport, canvasFactory }).promise;
-        const imgBuff = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        await page1.render({ 
+            canvasContext: ctx, 
+            viewport: viewport,
+            canvasFactory: canvasFactory
+        }).promise;
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
 
         const getPixel = (x, y) => {
             const i = (Math.floor(y) * canvas.width + Math.floor(x)) * 4;
-            return { r: imgBuff[i], g: imgBuff[i+1], b: imgBuff[i+2] };
+            return { r: data[i], g: data[i+1], b: data[i+2] };
         };
 
         const textContentPage = await page1.getTextContent();
@@ -97,24 +103,32 @@ app.all('/extract', async (req, res) => {
             return { str: it.str.trim(), x: pt[0], y: pt[1] };
         }).filter(it => it.str.length > 0);
 
-        // Map Layout
+        // Identificazione degli ancoraggi testuali (anche se non renderizzati visivamente)
         const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15"];
         const headerRow = items.filter(it => hoursKeys.includes(it.str) && it.y < viewport.height / 2).sort((a,b) => a.x - b.x);
-        const dateHeaders = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}/i)).sort((a,b) => a.x - b.x);
-        const risksRows = items.filter(it => ["Idrogeologico", "Idraulico", "Temporali", "Neve"].includes(it.str) && it.x < viewport.width/4).sort((a,b) => a.y - b.y);
-        const zoneNames = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
-        const zonesRows = items.filter(it => zoneNames.some(z => it.str.includes(z))).sort((a,b) => a.y - b.y);
+        
+        const dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
+        dateHeadersRaw.sort((a,b) => a.x - b.x);
+        const dateHeaders = [];
+        dateHeadersRaw.forEach(dh => { if (!dateHeaders.find(d => d.str === dh.str)) dateHeaders.push({ str: dh.str, x: dh.x }); });
 
-        const levelsMap = {
-            g: { code: 'Giallo', r: [200, 255], g: [200, 255], b: [0, 150] },
-            a: { code: 'Arancione', r: [200, 255], g: [100, 195], b: [0, 150] },
-            r: { code: 'Rosso', r: [200, 255], g: [0, 100], b: [0, 150] }
-        };
+        const riskNamesList = ["Idrogeologico", "Idraulico", "Temporali", "Neve"];
+        const risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < viewport.width/4).sort((a,b) => a.y - b.y);
+        
+        const zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
+        const zonesRows = items.filter(it => zoneNamesList.some(z => it.str.includes(z))).sort((a,b) => a.y - b.y);
+        
+        const cleanZones = [];
+        zonesRows.forEach(z => {
+            const matchedName = zoneNamesList.find(name => z.str.includes(name));
+            const last = cleanZones[cleanZones.length-1];
+            if(!last || (z.y - last.y) >= 30) { if(cleanZones.length < 7) cleanZones.push({ name: matchedName, y: z.y }); }
+        });
 
         const alertZonesFound = [];
-        
-        // Sampling Loop
-        zonesRows.forEach((zone, zIdx) => {
+
+        // CAMPIONAMENTO IBRIDO: Usa le coordinate del testo per pescare il colore
+        cleanZones.forEach((zone, zIdx) => {
             const zoneAlerts = [];
             const relevantRisks = risksRows.filter(r => Math.abs(r.y - zone.y) < 100).slice(0, 4);
             
@@ -123,49 +137,64 @@ app.all('/extract', async (req, res) => {
                 let currentDateIdx = 0;
 
                 headerRow.forEach((th, hIdx) => {
-                    if (th.str === "0" && hIdx > 0) currentDateIdx++;
+                    if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") currentDateIdx++;
                     
-                    const sx = th.x + 10, sy = risk.y - 8;
-                    let found = null;
+                    const sx = th.x + 10;
+                    const sy = risk.y - 8;
+                    let foundLevel = null;
                     
-                    // 7x7 scan for extreme robustness
-                    for(let dx = -3; dx <= 3; dx++) {
-                        for(let dy = -3; dy <= 3; dy++) {
+                    // Scansione locale per robustezza contro piccoli disallineamenti
+                    for(let dx = -5; dx <= 5; dx++) {
+                        for(let dy = -5; dy <= 5; dy++) {
                             const p = getPixel(sx + dx, sy + dy);
-                            if (p.r > 200 && p.g > 200 && p.b < 150) found = "🟡 Giallo";
-                            else if (p.r > 200 && p.g > 100 && p.g < 195 && p.b < 150) found = "🟠 Arancione";
-                            else if (p.r > 200 && p.g < 100 && p.b < 150) found = "🔴 Rosso";
-                            if(found) break;
+                            // Soglie colore ottimizzate
+                            if (p.r > 200 && p.g > 200 && p.b < 150) foundLevel = { name: "Giallo (Ordinaria criticità)", code: "giallo" };
+                            else if (p.r > 200 && p.g > 100 && p.g < 195 && p.b < 150) foundLevel = { name: "Arancione (Moderata criticità)", code: "arancione" };
+                            else if (p.r > 200 && p.g < 100 && p.b < 150) foundLevel = { name: "Rosso (Elevata criticità)", code: "rosso" };
+                            if(foundLevel) break;
                         }
-                        if(found) break;
+                        if(foundLevel) break;
                     }
-                    if(found) results.push({ level: found, hour: th.str, day: dateHeaders[currentDateIdx]?.str || "Oggi" });
+
+                    if(foundLevel) {
+                        const dIdx = Math.min(currentDateIdx, Math.max(0, dateHeaders.length - 1));
+                        const dateStrMatch = dateHeaders[dIdx]?.str || (currentDateIdx === 0 ? "Oggi" : "Domani");
+                        results.push({ level: foundLevel, hour: th.str, day: dateStrMatch });
+                    }
                 });
 
-                if(results.length > 0) zoneAlerts.push({ risk: risk.str, detections: results });
+                if(results.length > 0) {
+                    // Aggregazione per item XML
+                    zoneAlerts.push({ risk: risk.str, detections: results });
+                }
             });
-            if(zoneAlerts.length > 0) alertZonesFound.push({ name: zone.str, alerts: zoneAlerts });
+            if(zoneAlerts.length > 0) alertZonesFound.push({ zone: zone.name, alerts: zoneAlerts });
         });
 
-        // 4. RSS FEED GENERATION
+        // 4. GENERAZIONE FEED RSS/XML
         let xml = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>';
-        xml += `<title>Bollettino Protezione Civile Sardegna</title><description>${title}</description>`;
+        xml += `<title>Bollettino Protezione Civile Sardegna</title><description><![CDATA[${title}]]></description>`;
         
         if (alertZonesFound.length === 0) {
             xml += `<item><title>Nessuna Allerta Attiva</title><description>Nessun rischio identificato per le zone monitorate.</description></item>`;
         } else {
             alertZonesFound.forEach(az => {
-                xml += `<item><title>Allerta ${az.name}</title><description><![CDATA[`;
-                xml += `Validità: ${inizio} - ${fine}\n\n`;
+                xml += `<item><title><![CDATA[Allerta Zona: ${az.zone}]]></title><description><![CDATA[`;
+                xml += `Validità: dal ${inizio} al ${fine}\n\n`;
                 az.alerts.forEach(al => {
-                    xml += `⚠️ ${al.risk}:\n`;
-                    al.detections.forEach(d => xml += `- ${d.level} (ore ${d.hour} del ${d.day})\n`);
+                    const level = al.detections[0].level;
+                    const emoji = level.code === "giallo" ? "🟡" : (level.code === "arancione" ? "🟠" : "🔴");
+                    xml += `${emoji} Rischio: ${al.risk} (${level.name})\n`;
+                    al.detections.forEach(d => xml += `- ${d.day} ore ${d.hour}.00\n`);
                     xml += `\n`;
                 });
                 xml += `]]></description></item>`;
             });
         }
         xml += '</channel></rss>';
+        
+        res.type('application/xml').send(xml);
+        console.log("Feed XML generato con successo (Metodo Ibrido).");
         
         res.type('application/xml').send(xml);
     } catch (err) {
