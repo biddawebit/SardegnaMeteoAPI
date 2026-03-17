@@ -118,136 +118,28 @@ app.all('/extract', async (req, res) => {
         if (mFineAvviso) fineAvviso = mFineAvviso[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
 
         // -------------------------------------------------------------
-        // Estrazione Vettoriale Avanzata (Mappatura Robusta)
+        // Estrazione Pixel-Perfect (LOGICA RISCRITTA COMPLETAMENTE)
         // -------------------------------------------------------------
-        console.log("Avvio scansione vettoriale PDF avanzata...");
+        console.log("Avvio rendering Pixel-Perfect su Canvas...");
         const page1 = await pdf.getPage(1);
-        const viewport = page1.getViewport({ scale: 1.5 }); 
+        const viewport = page1.getViewport({ scale: 1.5 });
         
-        const ops = await page1.getOperatorList();
-        let opNames = {};
-        for (let k in OPS) { opNames[OPS[k]] = k; }
+        const canvasFactory = new NodeCanvasFactory();
+        const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
         
-        let coloredShapes = [];
-        let curColor = null;
-        let curPath = [];
-        
-        let ctm = [1, 0, 0, 1, 0, 0];
-        let ctmStack = [];
+        await page1.render({ 
+            canvasContext: ctx, 
+            viewport: viewport,
+            canvasFactory: canvasFactory
+        }).promise;
 
-        function transformMatrix(m1, m2) {
-            return [
-                m1[0] * m2[0] + m1[2] * m2[1],
-                m1[1] * m2[0] + m1[3] * m2[1],
-                m1[0] * m2[2] + m1[2] * m2[3],
-                m1[1] * m2[2] + m1[3] * m2[3],
-                m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
-                m1[1] * m2[4] + m1[3] * m2[5] + m1[5]
-            ];
-        }
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
 
-        function transformPoint(m, x, y) {
-            return [
-                x * m[0] + y * m[2] + m[4],
-                x * m[1] + y * m[3] + m[5]
-            ];
+        function getPixel(x, y) {
+            const i = (Math.floor(y) * canvas.width + Math.floor(x)) * 4;
+            return { r: data[i], g: data[i+1], b: data[i+2], a: data[i+3] };
         }
-        
-        function cmykToRgb(c, m, y, k) {
-            const r = 255 * (1 - c) * (1 - k);
-            const g = 255 * (1 - m) * (1 - k);
-            const b = 255 * (1 - y) * (1 - k);
-            return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
-        }
-
-        const levelsMap = {
-            'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
-            'arancione': { name: 'Arancione (Moderata criticità)', code: 'arancione' },
-            'rosso': { name: 'Rosso (Elevata criticità)', code: 'rosso' }
-        };
-
-        for (let i = 0; i < ops.fnArray.length; i++) {
-            const fn = ops.fnArray[i];
-            const args = ops.argsArray[i];
-            const opName = opNames[fn];
-            
-            if (opName === 'save') ctmStack.push([...ctm]);
-            if (opName === 'restore') ctm = ctmStack.pop();
-            if (opName === 'transform') ctm = transformMatrix(ctm, args);
-            
-            if (opName === 'setFillRGBColor' || opName === 'setStrokeRGBColor') {
-                curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
-            }
-            if (opName === 'setFillCMYKColor') {
-                curColor = cmykToRgb(args[0], args[1], args[2], args[3]);
-            }
-            
-            if (opName === 'constructPath') {
-                const pathOps = args[0];
-                const pathArgs = args[1];
-                let argIdx = 0;
-                for (let op of pathOps) {
-                    if (op === 19) { // RECT opcode
-                        curPath.push({ 
-                            type: 'rect', 
-                            x: pathArgs[argIdx], y: pathArgs[argIdx+1], 
-                            w: pathArgs[argIdx+2], h: pathArgs[argIdx+3],
-                            ctm: [...ctm]
-                        });
-                        argIdx += 4;
-                    } else if (op === 0 || op === 1) { // moveTo, lineTo
-                        curPath.push({ type: 'point', x: pathArgs[argIdx], y: pathArgs[argIdx+1], ctm: [...ctm] });
-                        argIdx += 2;
-                    } else if (op === 2 || op === 3) { argIdx += 6; }
-                }
-            }
-            if (opName === 'rectangle') {
-                curPath.push({ type: 'rect', x: args[0], y: args[1], w: args[2], h: args[3], ctm: [...ctm] });
-            }
-            
-            if (opName === 'fill' || opName === 'eoFill' || opName === 'stroke') {
-                if (curColor && curPath.length > 0) {
-                    let foundLevel = null;
-                    if (curColor.r > 200 && curColor.g > 200 && curColor.b < 100) foundLevel = levelsMap['giallo'];
-                    else if (curColor.r > 200 && curColor.g > 100 && curColor.g < 200 && curColor.b < 100) foundLevel = levelsMap['arancione'];
-                    else if (curColor.r > 200 && curColor.g < 100 && curColor.b < 100) foundLevel = levelsMap['rosso'];
-                    
-                    if (foundLevel) {
-                        for (let p of curPath) {
-                            let xs = [], ys = [];
-                            if (p.type === 'rect') {
-                                let pts = [
-                                    transformPoint(p.ctm, p.x, p.y),
-                                    transformPoint(p.ctm, p.x + p.w, p.y),
-                                    transformPoint(p.ctm, p.x, p.y + p.h),
-                                    transformPoint(p.ctm, p.x + p.w, p.y + p.h)
-                                ];
-                                pts.forEach(pt => {
-                                    let vp = viewport.convertToViewportPoint(pt[0], pt[1]);
-                                    xs.push(vp[0]); ys.push(vp[1]);
-                                });
-                            } else if (p.type === 'point') {
-                                let pt = transformPoint(p.ctm, p.x, p.y);
-                                let vp = viewport.convertToViewportPoint(pt[0], pt[1]);
-                                xs.push(vp[0]); ys.push(vp[1]);
-                            }
-                            
-                            if (xs.length > 0) {
-                                coloredShapes.push({
-                                    level: foundLevel,
-                                    minX: Math.min(...xs), maxX: Math.max(...xs),
-                                    minY: Math.min(...ys), maxY: Math.max(...ys)
-                                });
-                            }
-                        }
-                    }
-                }
-                curPath = [];
-            }
-            if (opName === 'endPath') curPath = [];
-        }
-        
-        console.log(`Trovati ${coloredShapes.length} elementi di allerta nel documento.`);
 
         const textContentPage = await page1.getTextContent();
         const items = textContentPage.items.map(it => {
@@ -255,6 +147,7 @@ app.all('/extract', async (req, res) => {
             return { str: it.str.trim(), x: pt[0], y: pt[1] };
         }).filter(it => it.str.length > 0);
 
+        // Identificazione orizzontale (ORARI)
         const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15", "Tendenza"];
         let timeHeaders = items.filter(it => hoursKeys.includes(it.str) && it.y < viewport.height / 2);
         
@@ -266,7 +159,9 @@ app.all('/extract', async (req, res) => {
         });
         let bestYStr = Object.keys(yGroups).sort((a,b) => yGroups[b].length - yGroups[a].length)[0];
         let headerRow = bestYStr ? yGroups[bestYStr].sort((a,b) => a.x - b.x) : [];
-        
+        console.log("Header Orari identificati:", headerRow.map(h => h.str).join(', '));
+
+        // Identificazione DATE
         let dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
         dateHeadersRaw.sort((a,b) => a.x - b.x);
         let dateHeaders = [];
@@ -274,6 +169,7 @@ app.all('/extract', async (req, res) => {
             if (!dateHeaders.find(d => d.str === dh.str)) dateHeaders.push({ str: dh.str, x: dh.x });
         });
 
+        // Identificazione RISCHI (Y delle righe)
         let riskNamesList = ["Idrogeologico", "Idraulico", "Temporali", "Neve"];
         let risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < (headerRow.length > 0 ? headerRow[0].x : viewport.width/2));
         risksRows.sort((a,b) => a.y - b.y);
@@ -282,6 +178,7 @@ app.all('/extract', async (req, res) => {
             if(!cleanRisks.find(cr => cr.str === r.str && Math.abs(cr.y - r.y) < 10)) cleanRisks.push(r);
         });
 
+        // Identificazione ZONE
         let zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
         let zonesRows = [];
         items.forEach(it => {
@@ -295,9 +192,16 @@ app.all('/extract', async (req, res) => {
             if(!last || (z.y - last.y) >= 30) { if(cleanZones.length < 7) cleanZones.push(z); }
         });
 
+        const levelsMap = {
+            'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
+            'arancione': { name: 'Arancione (Moderata criticità)', code: 'arancione' },
+            'rosso': { name: 'Rosso (Elevata criticità)', code: 'rosso' }
+        };
+
+        // Algoritmo di CAMPIONAMENTO PIXEL (Matrice 5x5 come su PHP)
         cleanZones.forEach((zone, zIdx) => {
             let zoneAlerts = [];
-            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 80); // Increased tolerance
+            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 80);
             let uniqueRisks = [];
             relevantRisks.forEach(r => { if(!uniqueRisks.find(ur => ur.str === r.str)) uniqueRisks.push(r); });
             
@@ -312,16 +216,20 @@ app.all('/extract', async (req, res) => {
                     if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") currentDateIdx++;
                     
                     let sampleX = th.x + 10; 
-                    let sampleY = risk.y - 10; 
+                    let sampleY = risk.y - 8; 
                     
                     let foundLevel = null;
-                    for (let shape of coloredShapes) {
-                        // Better collision: check if sampling point is within shape with padding
-                        if (sampleX >= shape.minX - 15 && sampleX <= shape.maxX + 15 &&
-                            sampleY >= shape.minY - 20 && sampleY <= shape.maxY + 20) {
-                            foundLevel = shape.level;
-                            break;
+                    // Scansione area 5x5 intorno al punto per sicurezza
+                    for(let dx = -2; dx <= 2; dx++) {
+                        for(let dy = -2; dy <= 2; dy++) {
+                            let px = getPixel(sampleX + dx, sampleY + dy);
+                            // Logica di soglia colore identica a PHP
+                            if(px.r > 200 && px.g > 200 && px.b < 100) foundLevel = levelsMap['giallo'];
+                            else if(px.r > 200 && px.g > 100 && px.g < 185 && px.b < 100) foundLevel = levelsMap['arancione'];
+                            else if(px.r > 200 && px.g < 100 && px.b < 100) foundLevel = levelsMap['rosso'];
+                            if(foundLevel) break;
                         }
+                        if(foundLevel) break;
                     }
 
                     if(foundLevel) {
@@ -374,7 +282,7 @@ app.all('/extract', async (req, res) => {
         });
 
         // -------------------------------------------------------------
-        // Costruzione XML per Make.com
+        // Costruzione XML per Feed RSS
         // -------------------------------------------------------------
         let xmlStr = '<' + '?xml version="1.0" encoding="UTF-8"?' + '>\n';
         xmlStr += `<rss version="2.0">\n`;
@@ -383,7 +291,6 @@ app.all('/extract', async (req, res) => {
         xmlStr += `    <description><![CDATA[${title}]]></description>\n`;
         
         if (alertZonesFound.length > 0) {
-            console.log("ALERT TROVATI. Generazione XML con zone: ", alertZonesFound.length);
             alertZonesFound.forEach(az => {
                 xmlStr += `    <item>\n`;
                 xmlStr += `      <title><![CDATA[Allerta Zona: ${az.zone}]]></title>\n`;
@@ -412,21 +319,18 @@ app.all('/extract', async (req, res) => {
                 xmlStr += `    </item>\n`;
             });
         } else {
-            console.log("NESSUN ALLARME RILEVATO: Restituzione XML vuoto");
             xmlStr += `    <item>\n`;
             xmlStr += `      <title><![CDATA[Nessuna Allerta]]></title>\n`;
-            xmlStr += `      <description><![CDATA[Nessuna criticità identificata in nessuna zona.]]></description>\n`;
+            xmlStr += `      <description><![CDATA[Nessuna criticità identificata in nessuna zona dal sistema di visione artificiale.]]></description>\n`;
             xmlStr += `    </item>\n`;
         }
         
         xmlStr += `  </channel>\n`;
         xmlStr += `</rss>`;
 
-        // Mandiamo ad Make.com l'XML finito
         res.type('application/xml');
         res.send(xmlStr);
-        
-        console.log("Elaborazione e Risposta XML completate con successo.");
+        console.log("Feed XML inviato con successo (Metodo Pixel-Perfect).");
 
     } catch (err) {
         console.error("Errore Generico API:", err);
