@@ -143,14 +143,13 @@ app.all('/extract', async (req, res) => {
                     const sy = risk.y - 8;
                     let foundLevel = null;
                     
-                    // Scansione locale per robustezza contro piccoli disallineamenti
-                    for(let dx = -5; dx <= 5; dx++) {
-                        for(let dy = -5; dy <= 5; dy++) {
+                    // Scansione locale per robustezza contro piccoli disallineamenti come nel PHP
+                    for(let dx = -2; dx <= 2; dx++) {
+                        for(let dy = -2; dy <= 2; dy++) {
                             const p = getPixel(sx + dx, sy + dy);
-                            // Soglie colore ottimizzate
-                            if (p.r > 200 && p.g > 200 && p.b < 150) foundLevel = { name: "Giallo (Ordinaria criticità)", code: "giallo" };
-                            else if (p.r > 200 && p.g > 100 && p.g < 195 && p.b < 150) foundLevel = { name: "Arancione (Moderata criticità)", code: "arancione" };
-                            else if (p.r > 200 && p.g < 100 && p.b < 150) foundLevel = { name: "Rosso (Elevata criticità)", code: "rosso" };
+                            if(p.r > 200 && p.g > 200 && p.b < 100) foundLevel = { name: "Giallo (Ordinaria criticità)", code: "giallo" };
+                            else if(p.r > 200 && p.g > 100 && p.g < 180 && p.b < 100) foundLevel = { name: "Arancione (Moderata criticità)", code: "arancione" };
+                            else if(p.r > 200 && p.g < 100 && p.b < 100) foundLevel = { name: "Rosso (Elevata criticità)", code: "rosso" };
                             if(foundLevel) break;
                         }
                         if(foundLevel) break;
@@ -159,13 +158,63 @@ app.all('/extract', async (req, res) => {
                     if(foundLevel) {
                         const dIdx = Math.min(currentDateIdx, Math.max(0, dateHeaders.length - 1));
                         const dateStrMatch = dateHeaders[dIdx]?.str || (currentDateIdx === 0 ? "Oggi" : "Domani");
-                        results.push({ level: foundLevel, hour: th.str, day: dateStrMatch });
+                        
+                        let endThStr = "00";
+                        let nextH = null;
+                        for(let i = hIdx + 1; i < headerRow.length; i++) {
+                            nextH = headerRow[i];
+                            break;
+                        }
+                        
+                        if (nextH) {
+                            endThStr = nextH.str;
+                        } else {
+                            if (th.str === '21') endThStr = '0';
+                            else if (th.str === '15') endThStr = '0'; 
+                            else {
+                                let h = parseInt(th.str);
+                                if(!isNaN(h)) {
+                                     endThStr = String((h + 3) % 24);
+                                }
+                            }
+                        }
+                        
+                        let startTimeStr = th.str.padStart(2, '0') + ":00";
+                        let endTimeStr = endThStr.padStart(2, '0') + ":00";
+
+                        results.push({ 
+                            level: foundLevel, 
+                            startDate: dateStrMatch,
+                            endDate: dateStrMatch,
+                            start: startTimeStr, 
+                            end: endTimeStr
+                        });
                     }
                 });
 
-                if(results.length > 0) {
+                // Unisci i segmenti contigui come in PHP per non avere slot duplicati
+                let merged = [];
+                if (results.length > 0) {
+                    let curr = results[0];
+                    for(let i = 1; i < results.length; i++) {
+                        let nextSeg = results[i];
+                        let sameDayCont = (curr.level.code === nextSeg.level.code && curr.endDate === nextSeg.startDate && curr.end === nextSeg.start);
+                        let crossMidnightCont = (curr.level.code === nextSeg.level.code && curr.end === "00:00" && nextSeg.start === "00:00");
+                        
+                        if (sameDayCont || crossMidnightCont) {
+                            curr.end = nextSeg.end;
+                            curr.endDate = nextSeg.endDate;
+                        } else {
+                            merged.push(curr);
+                            curr = nextSeg;
+                        }
+                    }
+                    merged.push(curr);
+                }
+
+                if(merged.length > 0) {
                     // Aggregazione per item XML
-                    zoneAlerts.push({ risk: risk.str, detections: results });
+                    zoneAlerts.push({ risk: risk.str, detections: merged });
                 }
             });
             if(zoneAlerts.length > 0) alertZonesFound.push({ zone: zone.name, alerts: zoneAlerts });
@@ -185,7 +234,15 @@ app.all('/extract', async (req, res) => {
                     const level = al.detections[0].level;
                     const emoji = level.code === "giallo" ? "🟡" : (level.code === "arancione" ? "🟠" : "🔴");
                     xml += `${emoji} Rischio: ${al.risk} (${level.name})\n`;
-                    al.detections.forEach(d => xml += `- ${d.day} ore ${d.hour}.00\n`);
+                    al.detections.forEach(d => {
+                        let alertLabel = "";
+                        if (d.startDate === d.endDate) {
+                            alertLabel = d.startDate + " dalle ore " + d.start.replace(':', '.') + " alle ore " + d.end.replace(':', '.');
+                        } else {
+                            alertLabel = d.startDate + " dalle ore " + d.start.replace(':', '.') + " alle ore " + d.end.replace(':', '.') + " di " + d.endDate;
+                        }
+                        xml += `- 🗓️⏰ ${alertLabel}\n`;
+                    });
                     xml += `\n`;
                 });
                 xml += `]]></description></item>`;
