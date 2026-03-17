@@ -40,106 +40,56 @@ class NodeCanvasFactory {
 app.all('/extract', async (req, res) => {
     try {
         const pdfUrl = req.method === 'POST' ? req.body.pdfUrl : req.query.pdfUrl;
-        
-        if (!pdfUrl) {
-            return res.status(400).json({ error: "Campo 'pdfUrl' mancante nel JSON della richiesta." });
-        }
+        if (!pdfUrl) return res.status(400).json({ error: "pdfUrl missing" });
 
-        console.log("-----------------------------------------");
-        console.log("START API - Scaricando PDF:", pdfUrl);
-        
-        // 1. Download PDF to Uint8Array safely server-side
-        const response = await fetch(pdfUrl, {
-             headers: { 'User-Agent': 'Mozilla/5.0 (Node.js API)' }
-        });
-        
-        if (!response.ok) {
-            throw new Error(`Errore HTTP durante il download: ${response.status}`);
-        }
+        console.log("START API - PDF:", pdfUrl);
+        const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        if (!response.ok) throw new Error(`Fetch error: ${response.status}`);
         
         const arrayBuffer = await response.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
 
-        console.log("PDF scaricato in memoria, avvio PDF.js...");
-
-        // 2. Init PDF.js parsing
         const loadingTask = getDocument({
             data: uint8Array,
             disableFontFace: true,
             standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
         });
-        
         const pdf = await loadingTask.promise;
-
+        
+        // 1. Text Parsing (First 2 pages)
         let fullText = '';
-        const pagesToRead = Math.min(2, pdf.numPages);
-        for (let i = 1; i <= pagesToRead; i++) {
+        for (let i = 1; i <= Math.min(2, pdf.numPages); i++) {
             const page = await pdf.getPage(i);
             const textContent = await page.getTextContent();
-            const pageText = textContent.items.map(item => item.str).join(' ');
-            fullText += pageText + '\n\n';
+            fullText += textContent.items.map(item => item.str).join(' ') + '\n';
         }
-        
         const normalizedText = fullText.replace(/\s+/g, ' ');
 
-        let title = "Titolo non presente.";
-        let inizio = "Dato non presente.";
-        let fine = "Dato non presente.";
-        let inizioAvviso = "Dato non presente.";
-        let fineAvviso = "Dato non presente.";
-        let alertZonesFound = [];
-        
-        const patternInizio = /Inizio validit[aà][\s:,-]{0,10}(\d{2}[\.\/]\d{2}[\.\/]\d{4}.*?\d{2}:\d{2})/i;
-        const patternFine = /Fine validit[aà][\s:,-]{0,10}(\d{2}[\.\/]\d{2}[\.\/]\d{4}.*?\d{2}:\d{2})/i;
-        const patternInizioAvviso = /Inizio avviso[\s:,-]{0,10}(\d{2}[\.\/]\d{2}[\.\/]\d{4}(?:\s*(?:alle\s*)?(?:ore\s*)?\d{2}:\d{2})?)/i;
-        const patternFineAvviso = /Fine avviso[\s:,-]{0,10}(\d{2}[\.\/]\d{2}[\.\/]\d{4}(?:\s*(?:alle\s*)?(?:ore\s*)?\d{2}:\d{2})?)/i;
+        // 2. Metadata Extraction
+        const patterns = {
+            title: /(AVVISO DI CRITICIT[AÀaà]['’]?.*?)(\s*e BOLLETTINO DI CRITICIT[AÀaà]['’]? REGIONALE|(?=Data di emissione|Prot\.|Inizio validit[aà]|IL DIRETTORE))/i,
+            inizio: /Inizio validit[aà][\s:,-]{0,10}(\d{2}[\.\/]\d{2}[\.\/]\d{4}.*?\d{2}:\d{2})/i,
+            fine: /Fine validit[aà][\s:,-]{0,10}(\d{2}[\.\/]\d{2}[\.\/]\d{4}.*?\d{2}:\d{2})/i
+        };
 
-        let mTitle = normalizedText.match(/(AVVISO DI CRITICIT[AÀaà]['’]?.*?)(\s*e BOLLETTINO DI CRITICIT[AÀaà]['’]? REGIONALE)/i);
-        if (!mTitle) mTitle = normalizedText.match(/(AVVISO DI CRITICIT[AÀaà]['’]?.*?)(?=Data di emissione|Prot\.|Inizio validit[aà]|IL DIRETTORE)/i);
-        if (mTitle) {
-            title = mTitle[1].trim();
-            if (title.length > 300) title = title.substring(0, 300) + '...';
-        } else {
-            let mTitleAlt = normalizedText.match(/(AVVISO DI CRITICIT[AÀaà]['’]?.{0,100}?)/i);
-            if (mTitleAlt) title = mTitleAlt[1].trim() + " (Titolo parziale)";
-        }
-        console.log("TITOLO ESTRATTO:", title);
+        const mTitle = normalizedText.match(patterns.title);
+        const title = mTitle ? mTitle[1].trim() : "AVVISO DI CRITICITÀ";
+        const inizio = (normalizedText.match(patterns.inizio) || [])[1] || "N/A";
+        const fine = (normalizedText.match(patterns.fine) || [])[1] || "N/A";
 
-        let mInizio = normalizedText.match(patternInizio);
-        if (mInizio) inizio = mInizio[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
-
-        let mFine = normalizedText.match(patternFine);
-        if (mFine) fine = mFine[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
-
-        let mInizioAvviso = normalizedText.match(patternInizioAvviso);
-        if (mInizioAvviso) inizioAvviso = mInizioAvviso[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
-
-        let mFineAvviso = normalizedText.match(patternFineAvviso);
-        if (mFineAvviso) fineAvviso = mFineAvviso[1].replace(/alle|ore/ig, '').replace(/\s{2,}/g, ' ').trim();
-
-        // -------------------------------------------------------------
-        // Estrazione Pixel-Perfect (LOGICA RISCRITTA COMPLETAMENTE)
-        // -------------------------------------------------------------
-        console.log("Avvio rendering Pixel-Perfect su Canvas...");
+        // 3. PIXEL-PERFECT CLASSIFICATION
         const page1 = await pdf.getPage(1);
         const viewport = page1.getViewport({ scale: 1.5 });
-        
         const canvasFactory = new NodeCanvasFactory();
         const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
         
-        await page1.render({ 
-            canvasContext: ctx, 
-            viewport: viewport,
-            canvasFactory: canvasFactory
-        }).promise;
+        await page1.render({ canvasContext: ctx, viewport, canvasFactory }).promise;
+        const imgBuff = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
 
-        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imgData.data;
-
-        function getPixel(x, y) {
+        const getPixel = (x, y) => {
             const i = (Math.floor(y) * canvas.width + Math.floor(x)) * 4;
-            return { r: data[i], g: data[i+1], b: data[i+2], a: data[i+3] };
-        }
+            return { r: imgBuff[i], g: imgBuff[i+1], b: imgBuff[i+2] };
+        };
 
         const textContentPage = await page1.getTextContent();
         const items = textContentPage.items.map(it => {
@@ -147,319 +97,99 @@ app.all('/extract', async (req, res) => {
             return { str: it.str.trim(), x: pt[0], y: pt[1] };
         }).filter(it => it.str.length > 0);
 
-        // Identificazione orizzontale (ORARI)
-        const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15", "Tendenza"];
-        let timeHeaders = items.filter(it => hoursKeys.includes(it.str) && it.y < viewport.height / 2);
-        
-        let yGroups = {};
-        timeHeaders.forEach(it => {
-            let gy = Math.round(it.y / 10) * 10;
-            if(!yGroups[gy]) yGroups[gy] = [];
-            yGroups[gy].push(it);
-        });
-        let bestYStr = Object.keys(yGroups).sort((a,b) => yGroups[b].length - yGroups[a].length)[0];
-        let headerRow = bestYStr ? yGroups[bestYStr].sort((a,b) => a.x - b.x) : [];
-        console.log("Header Orari identificati:", headerRow.map(h => h.str).join(', '));
-
-        // Identificazione DATE
-        let dateHeadersRaw = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}\.\d{2}\.\d{4}/i));
-        dateHeadersRaw.sort((a,b) => a.x - b.x);
-        let dateHeaders = [];
-        dateHeadersRaw.forEach(dh => {
-            if (!dateHeaders.find(d => d.str === dh.str)) dateHeaders.push({ str: dh.str, x: dh.x });
-        });
-
-        // Identificazione RISCHI (Y delle righe)
-        let riskNamesList = ["Idrogeologico", "Idraulico", "Temporali", "Neve"];
-        let risksRows = items.filter(it => riskNamesList.includes(it.str) && it.x < (headerRow.length > 0 ? headerRow[0].x : viewport.width/2));
-        risksRows.sort((a,b) => a.y - b.y);
-        let cleanRisks = [];
-        risksRows.forEach(r => {
-            if(!cleanRisks.find(cr => cr.str === r.str && Math.abs(cr.y - r.y) < 10)) cleanRisks.push(r);
-        });
-
-        // Identificazione ZONE
-        let zoneNamesList = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
-        let zonesRows = [];
-        items.forEach(it => {
-            let matched = zoneNamesList.find(z => it.str.includes(z) || z.includes(it.str));
-            if(matched && it.y > (parseInt(bestYStr) || 0)) zonesRows.push({ name: matched, y: it.y, x: it.x });
-        });
-        zonesRows.sort((a,b) => a.y - b.y);
-        let cleanZones = [];
-        zonesRows.forEach(z => {
-            let last = cleanZones[cleanZones.length-1];
-            if(!last || (z.y - last.y) >= 30) { if(cleanZones.length < 7) cleanZones.push(z); }
-        });
+        // Map Layout
+        const hoursKeys = ["14", "18", "21", "0", "3", "6", "9", "12", "15"];
+        const headerRow = items.filter(it => hoursKeys.includes(it.str) && it.y < viewport.height / 2).sort((a,b) => a.x - b.x);
+        const dateHeaders = items.filter(it => it.str.match(/(Sab|Dom|Lun|Mar|Mer|Gio|Ven)\s*,\s*\d{2}/i)).sort((a,b) => a.x - b.x);
+        const risksRows = items.filter(it => ["Idrogeologico", "Idraulico", "Temporali", "Neve"].includes(it.str) && it.x < viewport.width/4).sort((a,b) => a.y - b.y);
+        const zoneNames = ["Iglesiente", "Campidano", "Montevecchio Pischinappiu", "Flumendosa Flumineddu", "Tirso", "Gallura", "Logudoro"];
+        const zonesRows = items.filter(it => zoneNames.some(z => it.str.includes(z))).sort((a,b) => a.y - b.y);
 
         const levelsMap = {
-            'giallo': { name: 'Giallo (Ordinaria criticità)', code: 'giallo' },
-            'arancione': { name: 'Arancione (Moderata criticità)', code: 'arancione' },
-            'rosso': { name: 'Rosso (Elevata criticità)', code: 'rosso' }
+            g: { code: 'Giallo', r: [200, 255], g: [200, 255], b: [0, 150] },
+            a: { code: 'Arancione', r: [200, 255], g: [100, 195], b: [0, 150] },
+            r: { code: 'Rosso', r: [200, 255], g: [0, 100], b: [0, 150] }
         };
 
-        // Algoritmo di CAMPIONAMENTO PIXEL (Matrice 5x5 come su PHP)
-        cleanZones.forEach((zone, zIdx) => {
-            let zoneAlerts = [];
-            let relevantRisks = cleanRisks.filter(r => Math.abs(r.y - zone.y) < 80);
-            let uniqueRisks = [];
-            relevantRisks.forEach(r => { if(!uniqueRisks.find(ur => ur.str === r.str)) uniqueRisks.push(r); });
+        const alertZonesFound = [];
+        
+        // Sampling Loop
+        zonesRows.forEach((zone, zIdx) => {
+            const zoneAlerts = [];
+            const relevantRisks = risksRows.filter(r => Math.abs(r.y - zone.y) < 100).slice(0, 4);
             
-            if(uniqueRisks.length === 0 && cleanRisks.length >= 28) uniqueRisks = cleanRisks.slice(zIdx*4, zIdx*4 + 4);
-
-            uniqueRisks.forEach(risk => {
-                let activeSegments = [];
+            relevantRisks.forEach(risk => {
+                const results = [];
                 let currentDateIdx = 0;
 
                 headerRow.forEach((th, hIdx) => {
-                    if (th.str === "Tendenza") return; 
-                    if (th.str === "0" && hIdx > 0 && headerRow[hIdx-1].str !== "0") currentDateIdx++;
+                    if (th.str === "0" && hIdx > 0) currentDateIdx++;
                     
-                    let sampleX = th.x + 10; 
-                    let sampleY = risk.y - 8; 
+                    const sx = th.x + 10, sy = risk.y - 8;
+                    let found = null;
                     
-                    let foundLevel = null;
-                    // Scansione area 5x5 intorno al punto per sicurezza
-                    for(let dx = -2; dx <= 2; dx++) {
-                        for(let dy = -2; dy <= 2; dy++) {
-                            let px = getPixel(sampleX + dx, sampleY + dy);
-                            // Logica di soglia colore identica a PHP
-                            if(px.r > 200 && px.g > 200 && px.b < 100) foundLevel = levelsMap['giallo'];
-                            else if(px.r > 200 && px.g > 100 && px.g < 185 && px.b < 100) foundLevel = levelsMap['arancione'];
-                            else if(px.r > 200 && px.g < 100 && px.b < 100) foundLevel = levelsMap['rosso'];
-                            if(foundLevel) break;
+                    // 7x7 scan for extreme robustness
+                    for(let dx = -3; dx <= 3; dx++) {
+                        for(let dy = -3; dy <= 3; dy++) {
+                            const p = getPixel(sx + dx, sy + dy);
+                            if (p.r > 200 && p.g > 200 && p.b < 150) found = "🟡 Giallo";
+                            else if (p.r > 200 && p.g > 100 && p.g < 195 && p.b < 150) found = "🟠 Arancione";
+                            else if (p.r > 200 && p.g < 100 && p.b < 150) found = "🔴 Rosso";
+                            if(found) break;
                         }
-                        if(foundLevel) break;
+                        if(found) break;
                     }
-
-                    if(foundLevel) {
-                        let dIdx = Math.min(currentDateIdx, Math.max(0, dateHeaders.length - 1));
-                        let dateStrMatch = dateHeaders[dIdx] ? dateHeaders[dIdx].str : (currentDateIdx === 0 ? "Oggi" : "Domani");
-                        
-                        let endThStr = "00";
-                        let nextH = null;
-                        for(let i = hIdx + 1; i < headerRow.length; i++) {
-                            if (headerRow[i].str !== "Tendenza") { nextH = headerRow[i]; break; }
-                        }
-                        
-                        if (nextH) endThStr = nextH.str;
-                        else {
-                            let h = parseInt(th.str);
-                            if(!isNaN(h)) endThStr = String((h + 3) % 24);
-                        }
-                        
-                        activeSegments.push({
-                            level: foundLevel, startDate: dateStrMatch, endDate: dateStrMatch,
-                            start: th.str.padStart(2, '0') + ":00", end: endThStr.padStart(2, '0') + ":00"
-                        });
-                    }
+                    if(found) results.push({ level: found, hour: th.str, day: dateHeaders[currentDateIdx]?.str || "Oggi" });
                 });
 
-                let merged = [];
-                if (activeSegments.length > 0) {
-                    let curr = activeSegments[0];
-                    for(let i = 1; i < activeSegments.length; i++) {
-                        let nextSeg = activeSegments[i];
-                        if (curr.level.code === nextSeg.level.code && ((curr.endDate === nextSeg.startDate && curr.end === nextSeg.start) || (curr.end === "00:00" && nextSeg.start === "00:00"))) {
-                            curr.end = nextSeg.end; curr.endDate = nextSeg.endDate; 
-                        } else { merged.push(curr); curr = nextSeg; }
-                    }
-                    merged.push(curr);
-                }
-                
-                merged.forEach(m => {
-                    let alertLabel = (m.startDate === m.endDate) ? 
-                        `${m.startDate} dalle ore ${m.start.replace(':', '.')} alle ore ${m.end.replace(':', '.')}` :
-                        `${m.startDate} dalle ore ${m.start.replace(':', '.')} alle ore ${m.end.replace(':', '.')} di ${m.endDate}`;
-                    
-                    let existingAlert = zoneAlerts.find(a => a.risk === risk.str && a.level.code === m.level.code);
-                    if(existingAlert) existingAlert.times.push(alertLabel);
-                    else zoneAlerts.push({ risk: risk.str, level: m.level, times: [alertLabel] });
-                });
+                if(results.length > 0) zoneAlerts.push({ risk: risk.str, detections: results });
             });
-
-            if(zoneAlerts.length > 0) alertZonesFound.push({ zone: zone.name, alerts: zoneAlerts });
+            if(zoneAlerts.length > 0) alertZonesFound.push({ name: zone.str, alerts: zoneAlerts });
         });
 
-        // -------------------------------------------------------------
-        // Costruzione XML per Feed RSS
-        // -------------------------------------------------------------
-        let xmlStr = '<' + '?xml version="1.0" encoding="UTF-8"?' + '>\n';
-        xmlStr += `<rss version="2.0">\n`;
-        xmlStr += `  <channel>\n`;
-        xmlStr += `    <title>Allerte Protezione Civile Sardegna</title>\n`;
-        xmlStr += `    <description><![CDATA[${title}]]></description>\n`;
+        // 4. RSS FEED GENERATION
+        let xml = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>';
+        xml += `<title>Bollettino Protezione Civile Sardegna</title><description>${title}</description>`;
         
-        if (alertZonesFound.length > 0) {
-            alertZonesFound.forEach(az => {
-                xmlStr += `    <item>\n`;
-                xmlStr += `      <title><![CDATA[Allerta Zona: ${az.zone}]]></title>\n`;
-                xmlStr += `      <pubDate>${new Date().toUTCString()}</pubDate>\n`;
-                xmlStr += `      <category><![CDATA[${az.zone}]]></category>\n`;
-                
-                let descText = `${title}\n\n`;
-                descText += `Zona ${az.zone}\n`;
-                descText += `Validità bollettino: dal ${inizio} al ${fine}\n\n`;
-                
-                az.alerts.forEach(al => {
-                    let levelEmoji = "";
-                    if (al.level.code === "giallo") levelEmoji = "🟡";
-                    else if (al.level.code === "arancione") levelEmoji = "🟠";
-                    else if (al.level.code === "rosso") levelEmoji = "🔴";
-                    
-                    descText += `⚠️ Rischio: ${al.risk}\n`;
-                    descText += `${levelEmoji} Livello: ${al.level.name}\n`;
-                    if (al.times && al.times.length > 0) {
-                        descText += `Fasce orarie:\n- 🗓️⏰ ${al.times.join('\n- 🗓️⏰ ')}\n`;
-                    }
-                    descText += `\n`;
-                });
-                
-                xmlStr += `      <description><![CDATA[${descText.trim()}]]></description>\n`;
-                xmlStr += `    </item>\n`;
-            });
+        if (alertZonesFound.length === 0) {
+            xml += `<item><title>Nessuna Allerta Attiva</title><description>Nessun rischio identificato per le zone monitorate.</description></item>`;
         } else {
-            xmlStr += `    <item>\n`;
-            xmlStr += `      <title><![CDATA[Nessuna Allerta]]></title>\n`;
-            xmlStr += `      <description><![CDATA[Nessuna criticità identificata in nessuna zona dal sistema di visione artificiale.]]></description>\n`;
-            xmlStr += `    </item>\n`;
+            alertZonesFound.forEach(az => {
+                xml += `<item><title>Allerta ${az.name}</title><description><![CDATA[`;
+                xml += `Validità: ${inizio} - ${fine}\n\n`;
+                az.alerts.forEach(al => {
+                    xml += `⚠️ ${al.risk}:\n`;
+                    al.detections.forEach(d => xml += `- ${d.level} (ore ${d.hour} del ${d.day})\n`);
+                    xml += `\n`;
+                });
+                xml += `]]></description></item>`;
+            });
         }
+        xml += '</channel></rss>';
         
-        xmlStr += `  </channel>\n`;
-        xmlStr += `</rss>`;
-
-        res.type('application/xml');
-        res.send(xmlStr);
-        console.log("Feed XML inviato con successo (Metodo Pixel-Perfect).");
-
+        res.type('application/xml').send(xml);
     } catch (err) {
-        console.error("Errore Generico API:", err);
-        res.status(500).json({ error: err.message, stack: err.stack });
+        console.error(err);
+        res.status(500).send(err.message);
     }
 });
 
+// DEBUG ENDPOINT: Returns the actual PNG of the rendered PDF
 app.get('/debug-image', async (req, res) => {
     try {
         const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
-        
-        const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const response = await fetch(pdfUrl);
         const arrayBuffer = await response.arrayBuffer();
-        
-        const loadingTask = getDocument({
-            data: new Uint8Array(arrayBuffer),
-            disableFontFace: true,
-            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
-        });
+        const loadingTask = getDocument({ data: new Uint8Array(arrayBuffer), disableFontFace: true });
         const pdf = await loadingTask.promise;
         const page = await pdf.getPage(1);
         const viewport = page.getViewport({ scale: 1.5 });
-        
         const canvasFactory = new NodeCanvasFactory();
-        const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
-        const ctx = canvasAndContext.context;
-        
-        await page.render({ 
-            canvasContext: ctx, 
-            viewport: viewport,
-            canvasFactory: canvasFactory
-        }).promise;
-
-        const buffer = canvasAndContext.canvas.toBuffer('image/png');
-        res.type('image/png');
-        res.send(buffer);
-        
-    } catch (err) {
-        res.status(500).send("Error: " + err.message);
-    }
-});
-
-app.get('/debug-ops', async (req, res) => {
-    try {
-        const pdfUrl = req.query.pdfUrl || 'http://www.sardegnaambiente.it/documenti/20_1059_20260305133801.pdf';
-        
-        const response = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const arrayBuffer = await response.arrayBuffer();
-        
-        const loadingTask = getDocument({
-            data: new Uint8Array(arrayBuffer),
-            disableFontFace: true,
-            standardFontDataUrl: `node_modules/pdfjs-dist/standard_fonts/`
-        });
-        const pdf = await loadingTask.promise;
-        const page = await pdf.getPage(1);
-        
-        const ops = await page.getOperatorList();
-        
-        let shapes = [];
-        let curColor = null;
-        let curPath = [];
-        
-        // Reverse engineer OPS map
-        let opNames = {};
-        for (let k in OPS) { opNames[OPS[k]] = k; }
-        
-        let recentOps = [];
-        
-        for (let i = 0; i < ops.fnArray.length; i++) {
-            const fn = ops.fnArray[i];
-            const args = ops.argsArray[i];
-            const opName = opNames[fn];
-            
-            // setFillRGBColor
-            if (opName === 'setFillRGBColor' || opName === 'setStrokeRGBColor') {
-                curColor = { r: Math.round(args[0]*255), g: Math.round(args[1]*255), b: Math.round(args[2]*255) };
-            }
-            // CMYK
-            if (opName === 'setFillCMYKColor') {
-                curColor = { cmyk: args };
-            }
-            
-            // Collect path ops
-            if (opName === 'rectangle') {
-                curPath.push({ type: 'rect', args: args });
-            }
-            if (opName === 'moveTo' || opName === 'lineTo') {
-                curPath.push({ type: opName, args: args });
-            }
-            
-            // When filled, log the color
-            if (opName === 'fill' || opName === 'eoFill' || opName === 'stroke') {
-                if (curColor && curPath.length > 0) {
-                    // Only care about colored things
-                    if (curColor.r !== undefined && (curColor.r > 100 || curColor.g > 100)) {
-                        shapes.push({
-                            color: curColor,
-                            path: curPath.slice()
-                        });
-                    }
-                }
-                curPath = [];
-            }
-            
-            if (opName === 'endPath') {
-                curPath = [];
-            }
-            
-            if (i < 500) { // Just get the first few for a summary
-                recentOps.push({ op: opName, args: args });
-            }
-        }
-        
-        const textContentPage = await page.getTextContent();
-        const texts = textContentPage.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] })).filter(t => t.str.trim().length > 0);
-        
-        res.json({
-            foundColoredShapes: shapes.length,
-            shapes: shapes,
-            first500Ops: recentOps
-        });
-        
-    } catch (err) {
-        res.status(500).json({ error: err.message, stack: err.stack });
-    }
+        const { canvas, context: ctx } = canvasFactory.create(viewport.width, viewport.height);
+        await page.render({ canvasContext: ctx, viewport, canvasFactory }).promise;
+        res.type('image/png').send(canvas.toBuffer());
+    } catch (e) { res.status(500).send(e.message); }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`📡 API Estrazione Colori PDF in ascolto sulla porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
