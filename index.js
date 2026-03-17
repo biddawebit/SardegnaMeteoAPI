@@ -117,16 +117,17 @@ app.post('/extract', async (req, res) => {
         const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
         const ctx = canvasAndContext.context;
         
-        // IMPORTANT: Force white background so transparent PDFs don't become black
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, viewport.width, viewport.height);
-
         await page1.render({ 
             canvasContext: ctx, 
             viewport: viewport,
-            canvasFactory: canvasFactory,
-            background: 'rgba(255,255,255,1)' 
+            canvasFactory: canvasFactory
         }).promise;
+        
+        // IMPORTANT: PDF.js overwrites the canvas, so we must add the white background AFTER rendering
+        ctx.globalCompositeOperation = 'destination-over';
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, viewport.width, viewport.height);
+        ctx.globalCompositeOperation = 'source-over';
         
         console.log("Render completato: Size", viewport.width, "x", viewport.height);
         
@@ -242,7 +243,7 @@ app.post('/extract', async (req, res) => {
                             for(let dy = -4; dy <= 4; dy += 2) {
                                 let px = getPixel(sampleX + dx, sampleY + dy);
                                 
-                                // TOLLERANZA ESTREMA PER SERVER LINUX E SFONDO (Vercel/Render)
+                                // TOLLERANZA ESTREMA PER SERVER LINUX (Vercel/Render)
                                 // Giallo
                                 if(px.r > 130 && px.g > 130 && px.b < 180 && px.r > px.b + 50) { 
                                     foundLevel = levelsMap['giallo']; 
@@ -422,15 +423,17 @@ app.get('/debug-image', async (req, res) => {
         const canvasAndContext = canvasFactory.create(viewport.width, viewport.height);
         const ctx = canvasAndContext.context;
         
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, viewport.width, viewport.height);
-
         await page.render({ 
             canvasContext: ctx, 
             viewport: viewport,
-            canvasFactory: canvasFactory,
-            background: 'rgba(255,255,255,1)' 
+            canvasFactory: canvasFactory
         }).promise;
+
+        // Force white background AFTER rendering
+        ctx.globalCompositeOperation = 'destination-over';
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, viewport.width, viewport.height);
+        ctx.globalCompositeOperation = 'source-over';
         
         const buffer = canvasAndContext.canvas.toBuffer('image/png');
         res.type('image/png');
